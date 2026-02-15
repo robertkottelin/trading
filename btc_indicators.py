@@ -525,6 +525,11 @@ def main():
         action="store_true",
         help="Only download raw CSVs, skip feature engineering",
     )
+    parser.add_argument(
+        "--features-only",
+        action="store_true",
+        help="Rebuild features from existing raw CSVs (skip download)",
+    )
     args = parser.parse_args()
 
     setup_logging()
@@ -535,37 +540,75 @@ def main():
     log.info("  Time: %s", timestamp_now())
     if args.download_only:
         log.info("  Mode: download-only (no feature engineering)")
+    if args.features_only:
+        log.info("  Mode: features-only (rebuild from existing raw CSVs)")
     log.info("  Log file: %s", LOG_FILE)
     log.info("=" * 60)
 
     results = {}
     total_start = time.time()
 
-    # --- Phase 1: Download ---
-    log.info("\n--- Phase 1: Download ---")
-
     spot_klines = []
     futures_klines = []
 
-    # Download spot klines
-    t0 = time.time()
-    try:
-        spot_klines = download_spot_klines()
-        results["spot_klines"] = {"status": "ok", "elapsed": time.time() - t0}
-    except Exception as e:
-        results["spot_klines"] = {"status": "error", "error": str(e), "elapsed": time.time() - t0}
-        log.error("[1/2] FAILED: %s", e)
-        log.debug(traceback.format_exc())
+    if args.features_only:
+        # --- Load from existing raw CSVs ---
+        log.info("\n--- Loading from existing raw CSVs ---")
+        t0 = time.time()
+        try:
+            df_spot = pd.read_csv(os.path.join(OUTPUT_DIR, "raw_spot_klines.csv"))
+            log.info("  Loaded raw_spot_klines.csv: %s rows", f"{len(df_spot):,}")
+            # Convert back to kline list format
+            for _, row in df_spot.iterrows():
+                spot_klines.append([
+                    int(row["open_time_ms"]), str(row["open"]), str(row["high"]),
+                    str(row["low"]), str(row["close"]), str(row["volume"]),
+                    0, str(row["quote_volume"]), int(row["trades"]),
+                    str(row["taker_buy_volume"]), str(row["taker_buy_quote_volume"]), 0,
+                ])
+            results["load_spot"] = {"status": "ok", "elapsed": time.time() - t0}
+        except Exception as e:
+            results["load_spot"] = {"status": "error", "error": str(e), "elapsed": time.time() - t0}
+            log.error("Failed to load raw_spot_klines.csv: %s", e)
 
-    # Download futures klines
-    t0 = time.time()
-    try:
-        futures_klines = download_futures_klines()
-        results["futures_klines"] = {"status": "ok", "elapsed": time.time() - t0}
-    except Exception as e:
-        results["futures_klines"] = {"status": "error", "error": str(e), "elapsed": time.time() - t0}
-        log.error("[2/2] FAILED: %s", e)
-        log.debug(traceback.format_exc())
+        t0 = time.time()
+        try:
+            df_fut = pd.read_csv(os.path.join(OUTPUT_DIR, "raw_futures_klines.csv"))
+            log.info("  Loaded raw_futures_klines.csv: %s rows", f"{len(df_fut):,}")
+            for _, row in df_fut.iterrows():
+                futures_klines.append([
+                    int(row["open_time_ms"]), str(row["open"]), str(row["high"]),
+                    str(row["low"]), str(row["close"]), str(row["volume"]),
+                    0, str(row["quote_volume"]), int(row["trades"]),
+                    str(row["taker_buy_volume"]), str(row["taker_buy_quote_volume"]), 0,
+                ])
+            results["load_futures"] = {"status": "ok", "elapsed": time.time() - t0}
+        except Exception as e:
+            results["load_futures"] = {"status": "error", "error": str(e), "elapsed": time.time() - t0}
+            log.error("Failed to load raw_futures_klines.csv: %s", e)
+    else:
+        # --- Phase 1: Download ---
+        log.info("\n--- Phase 1: Download ---")
+
+        # Download spot klines
+        t0 = time.time()
+        try:
+            spot_klines = download_spot_klines()
+            results["spot_klines"] = {"status": "ok", "elapsed": time.time() - t0}
+        except Exception as e:
+            results["spot_klines"] = {"status": "error", "error": str(e), "elapsed": time.time() - t0}
+            log.error("[1/2] FAILED: %s", e)
+            log.debug(traceback.format_exc())
+
+        # Download futures klines
+        t0 = time.time()
+        try:
+            futures_klines = download_futures_klines()
+            results["futures_klines"] = {"status": "ok", "elapsed": time.time() - t0}
+        except Exception as e:
+            results["futures_klines"] = {"status": "error", "error": str(e), "elapsed": time.time() - t0}
+            log.error("[2/2] FAILED: %s", e)
+            log.debug(traceback.format_exc())
 
     # --- Phase 2: Feature Engineering ---
     if not args.download_only:

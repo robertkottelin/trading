@@ -1,0 +1,14 @@
+# Core ML pipeline
+pandas>=2.0.0
+numpy>=1.24.0
+ta>=0.10.2
+lightgbm>=4.0.0
+catboost>=1.2
+optuna>=3.3.0
+
+# Data downloaders
+requests>=2.31.0
+python-dotenv>=1.0.0
+PyYAML>=6.0
+yfinance>=0.2.31
+pytrends>=4.9.2

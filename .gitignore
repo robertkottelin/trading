@@ -1,5 +1,11 @@
 # Data files (too large for git)
-btc_data/
+raw_data/
+processed_data/
+models/
+downloaders/logs/
+model_training/logs/
+processed_data/logs/
+catboost_info/
 
 # Python
 __pycache__/
@@ -15,8 +21,18 @@ build/
 .venv/
 venv/
 
+# Logs
+*.log
+
+# Local config overrides
+config/settings.local.yaml
+
 # IDE
 .vscode/
 .idea/
 *.swp
 *.swo
+
+# Claude Code
+.claude_tmp/
+.claude/settings.local.json

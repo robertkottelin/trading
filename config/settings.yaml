@@ -1,0 +1,90 @@
+# Data downloader settings — public config only (no secrets).
+# Secrets go in .env (FRED_API_KEY, etc.)
+
+output_dir: raw_data
+
+dydx:
+  base_url: https://indexer.dydx.trade/v4
+  market: BTC-USD
+  start_date: "2023-10-01"
+  rate_limit_delay: 0.3
+  max_retries: 3
+  candle_resolution: 5MINS
+  candle_limit: 1000
+  trade_limit: 1000
+  funding_limit: 1000
+
+binance:
+  spot_base_url: https://api.binance.com
+  futures_base_url: https://fapi.binance.com
+  spot_ticker: BTCUSDT
+  futures_ticker: BTCUSDT
+  spot_start_date: "2017-08-17"
+  futures_start_date: "2019-09-08"
+  timeframe: 5m
+  timeframe_ms: 300000
+  kline_limit: 1000
+  rate_limit_delay: 0.3
+  max_retries: 3
+
+deribit:
+  base_url: https://www.deribit.com/api/v2
+  max_retries: 3
+  rate_limit_delay: 0.5
+
+bybit:
+  base_url: https://api.bybit.com
+  max_retries: 3
+  rate_limit_delay: 0.5
+
+okx:
+  base_url: https://www.okx.com
+  max_retries: 3
+  rate_limit_delay: 0.5
+
+coinbase_premium:
+  max_retries: 3
+  rate_limit_delay: 0.3
+
+blockchain:
+  max_retries: 3
+  rate_limit_delay: 10.0
+
+macro:
+  max_retries: 3
+  rate_limit_delay: 0.5
+  fred_base_url: https://api.stlouisfed.org/fred/series/observations
+  start_date: "2015-01-01"
+
+sentiment:
+  max_retries: 3
+  rate_limit_delay: 1.0
+  fng_url: https://api.alternative.me/fng/
+  coingecko_base_url: https://api.coingecko.com/api/v3
+
+btc_network:
+  max_retries: 3
+  rate_limit_delay: 0.5
+  mempool_base_url: https://mempool.space/api
+
+defi:
+  max_retries: 3
+  rate_limit_delay: 0.5
+  stablecoin_url: https://stablecoins.llama.fi/stablecoins
+  tvl_url: https://api.llama.fi/v2/historicalChainTvl
+
+coinalyze:
+  base_url: https://api.coinalyze.net/v1
+  max_retries: 3
+  rate_limit_delay: 1.5
+  symbol: BTCUSDT_PERP.A
+  start_date: "2020-01-01"
+
+hyperliquid:
+  base_url: https://api.hyperliquid.xyz
+  max_retries: 3
+  rate_limit_delay: 0.5
+
+cftc:
+  max_retries: 3
+  rate_limit_delay: 1.0

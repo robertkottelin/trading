@@ -4,21 +4,24 @@ Combines ML model signals, market context, portfolio state, and decision
 history into a prompt for Grok, then saves the structured decision.
 
 Usage:
-    python -m llm_agent.reasoning_agent                    # full run
+    python -m llm_agent.reasoning_agent                    # full run (with execution)
+    python -m llm_agent.reasoning_agent --no-execute       # skip execution stage
     python -m llm_agent.reasoning_agent --dry-run          # show prompt, skip Grok
     python -m llm_agent.reasoning_agent --skip-signals     # skip ML inference
     python -m llm_agent.reasoning_agent --skip-web-search  # disable web/X search
 """
 
 import argparse
+import asyncio
 import logging
 import sys
 from datetime import datetime, timezone
 
+import yaml
 from dotenv import load_dotenv
 
 from llm_agent import signal_generator, context_builder, portfolio_reader
-from llm_agent import decision_manager, grok_client
+from llm_agent import decision_manager, grok_client, trade_history
 
 log = logging.getLogger("llm_agent")
 
@@ -33,7 +36,8 @@ def setup_logging(verbose: bool = False):
 
 
 def build_prompt(signals_text: str, context_text: str,
-                 portfolio_text: str, history_text: str) -> str:
+                 portfolio_text: str, history_text: str,
+                 trade_history_text: str) -> str:
     """Compose the full prompt from all sections."""
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     sections = [
@@ -44,6 +48,8 @@ def build_prompt(signals_text: str, context_text: str,
         context_text,
         "",
         portfolio_text,
+        "",
+        trade_history_text,
         "",
         history_text,
         "",
@@ -59,12 +65,39 @@ def run(args):
     """Main execution flow."""
     load_dotenv()
 
+    # --- Stage 0: Orphan order cleanup (live mode only) ---
+    exec_cfg = yaml.safe_load(
+        open("config/settings.yaml")
+    ).get("execution", {})
+    mode = exec_cfg.get("mode", "paper")
+    if mode == "live" and not args.no_execute:
+        log.info("Stage 0/7: Checking for orphan orders...")
+        try:
+            from execution.dydx_client import DydxClient
+            from execution.dydx_executor import DydxExecutor
+
+            async def _cleanup():
+                client = DydxClient()
+                await client.connect()
+                try:
+                    executor = DydxExecutor(client, config=exec_cfg)
+                    return await executor.cleanup_orphan_orders()
+                finally:
+                    await client.disconnect()
+
+            cleaned = asyncio.run(_cleanup())
+            if cleaned > 0:
+                log.warning("Cleaned up %d orphan order(s)", cleaned)
+        except Exception as e:
+            log.warning("Orphan cleanup failed (non-fatal): %s", e)
+
     # --- Stage 1: ML signals ---
+    signals_result = None
     if args.skip_signals:
         signals_text = "ML MODEL SIGNALS: Skipped (--skip-signals flag)."
         log.info("Skipping ML signal generation")
     else:
-        log.info("Stage 1/6: Generating ML signals...")
+        log.info("Stage 1/7: Generating ML signals...")
         try:
             signals_result = signal_generator.generate_signals()
             signals_text = signals_result["text_summary"]
@@ -76,7 +109,7 @@ def run(args):
             signals_text = f"ML MODEL SIGNALS: Error — {e}"
 
     # --- Stage 2: Market context ---
-    log.info("Stage 2/6: Building market context...")
+    log.info("Stage 2/7: Building market context...")
     try:
         context_text = context_builder.build_context()
         log.info("Market context built (%d chars)", len(context_text))
@@ -85,7 +118,7 @@ def run(args):
         context_text = f"MARKET CONTEXT: Error — {e}"
 
     # --- Stage 3: Portfolio state ---
-    log.info("Stage 3/6: Reading portfolio state...")
+    log.info("Stage 3/7: Reading portfolio state...")
     try:
         portfolio_text = portfolio_reader.get_portfolio()
         log.info("Portfolio state retrieved")
@@ -94,7 +127,7 @@ def run(args):
         portfolio_text = f"PORTFOLIO STATE: Unavailable — {e}"
 
     # --- Stage 4: Resolve pending decisions ---
-    log.info("Stage 4/6: Resolving pending decisions...")
+    log.info("Stage 4/7: Resolving pending decisions...")
     try:
         resolved = decision_manager.resolve_pending()
         if resolved > 0:
@@ -102,16 +135,25 @@ def run(args):
     except Exception as e:
         log.warning("Decision resolution failed: %s", e)
 
-    # --- Stage 5: Get decision history ---
-    log.info("Stage 5/6: Loading decision history...")
+    # --- Stage 5a: Get decision history ---
+    log.info("Stage 5/7: Loading decision history...")
     try:
         history_text = decision_manager.get_recent_summary()
     except Exception as e:
         log.warning("History loading failed: %s", e)
         history_text = "RECENT DECISIONS: Unavailable"
 
+    # --- Stage 5b: Get trade execution history ---
+    try:
+        trade_history_text = trade_history.get_trade_history()
+        log.info("Trade history loaded")
+    except Exception as e:
+        log.warning("Trade history loading failed: %s", e)
+        trade_history_text = "TRADE HISTORY: Unavailable"
+
     # --- Compose prompt ---
-    prompt = build_prompt(signals_text, context_text, portfolio_text, history_text)
+    prompt = build_prompt(signals_text, context_text, portfolio_text,
+                          history_text, trade_history_text)
 
     if args.dry_run:
         print("\n" + "=" * 80)
@@ -124,7 +166,7 @@ def run(args):
         return
 
     # --- Stage 6: Call Grok ---
-    log.info("Stage 6/6: Calling Grok for decision...")
+    log.info("Stage 6/7: Calling Grok for decision...")
     try:
         enable_web = not args.skip_web_search
         decision = grok_client.get_decision(prompt, enable_web_search=enable_web)
@@ -136,7 +178,7 @@ def run(args):
     # Add market metadata to decision
     decision["market_conditions"] = _extract_market_conditions(context_text)
 
-    if not args.skip_signals:
+    if signals_result is not None:
         decision["model_consensus"] = signals_result.get("consensus", {})
 
     # --- Save decision ---
@@ -147,6 +189,47 @@ def run(args):
 
     # --- Print summary ---
     _print_summary(decision)
+
+    # --- Stage 7: Execute trade ---
+    if not args.no_execute:
+        log.info("Stage 7/7: Executing trade...")
+        try:
+            exec_cfg = yaml.safe_load(
+                open("config/settings.yaml")
+            ).get("execution", {})
+            mode = exec_cfg.get("mode", "paper")
+            if mode == "paper":
+                from execution.paper_executor import PaperExecutor
+                trade = PaperExecutor().execute_decision(decision)
+            else:
+                from execution.dydx_client import DydxClient
+                from execution.dydx_executor import DydxExecutor
+                from execution.risk_manager import RiskManager
+
+                async def _live_execute():
+                    client = DydxClient()
+                    await client.connect()
+                    try:
+                        executor = DydxExecutor(client, RiskManager(exec_cfg))
+                        return await executor.execute_decision(decision)
+                    finally:
+                        await client.disconnect()
+
+                trade = asyncio.run(_live_execute())
+
+            status = trade.get("status", "?")
+            action = trade.get("action", "?")
+            log.info("Execution complete: %s — %s", action, status)
+            if action == "REJECTED":
+                print(f"  Trade rejected: {trade.get('rejection_reason', '?')}")
+            elif action == "ENTRY":
+                print(f"  {trade.get('direction')} {trade.get('size_btc')} BTC "
+                      f"@ ${trade.get('fill_price', 0):,.2f} [{status}]")
+        except Exception as e:
+            log.error("Execution failed: %s", e)
+            print(f"\nExecution error: {e}")
+    else:
+        log.info("Skipping execution (--no-execute flag)")
 
 
 def _extract_market_conditions(context_text: str) -> dict:
@@ -244,6 +327,8 @@ def main():
                         help="Skip ML model inference (faster for debugging)")
     parser.add_argument("--skip-web-search", action="store_true",
                         help="Disable Grok web_search and x_search tools")
+    parser.add_argument("--no-execute", action="store_true",
+                        help="Skip trade execution (Stage 7)")
     parser.add_argument("--verbose", "-v", action="store_true",
                         help="Enable debug logging")
     args = parser.parse_args()

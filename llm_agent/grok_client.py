@@ -14,7 +14,7 @@ import requests
 log = logging.getLogger(__name__)
 
 API_URL = "https://api.x.ai/v1/responses"
-MODEL = "grok-3-fast"
+MODEL = "grok-4-fast-non-reasoning"
 MAX_RETRIES = 2
 RETRY_DELAY = 5  # seconds
 
@@ -209,6 +209,28 @@ def _validate_decision(decision: dict):
                        "duration_minutes", "position_size_pct"]:
             if field not in decision:
                 raise ValueError(f"Missing field for trade: {field}")
+
+        # Value range validation
+        entry = decision["entry_price"]
+        tp = decision["take_profit"]
+        sl = decision["stop_loss"]
+        dur = decision["duration_minutes"]
+        size = decision["position_size_pct"]
+
+        if entry <= 0:
+            raise ValueError(f"entry_price must be > 0, got {entry}")
+        if not (0 < size <= 1):
+            raise ValueError(f"position_size_pct must be in (0, 1], got {size}")
+        if dur <= 0:
+            raise ValueError(f"duration_minutes must be > 0, got {dur}")
+
+        direction = decision["direction"]
+        if direction == "LONG" and not (tp > entry > sl):
+            raise ValueError(
+                f"LONG price ordering invalid: TP({tp}) > entry({entry}) > SL({sl})")
+        if direction == "SHORT" and not (sl > entry > tp):
+            raise ValueError(
+                f"SHORT price ordering invalid: SL({sl}) > entry({entry}) > TP({tp})")
 
     # Set defaults for NO_TRADE
     if decision["direction"] == "NO_TRADE":

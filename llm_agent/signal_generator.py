@@ -72,8 +72,10 @@ def _build_features() -> pd.DataFrame:
         dydx_ohlcv["quote_volume"] = pd.to_numeric(dydx["usd_volume"], errors="coerce")
 
     if len(dydx_ohlcv) < MIN_CANDLES:
-        log.warning("Only %d dYdX candles (need %d for reliable features)",
-                     len(dydx_ohlcv), MIN_CANDLES)
+        log.error("Only %d dYdX candles (need %d for reliable features) — "
+                  "skipping ML inference this cycle",
+                  len(dydx_ohlcv), MIN_CANDLES)
+        return pd.DataFrame()
 
     # Compute dYdX TA features (no prefix — these are the primary features)
     log.info("Computing dYdX TA features on %d candles...", len(dydx_ohlcv))
@@ -226,6 +228,13 @@ def _run_single_model(model_def: dict, features_df: pd.DataFrame,
     for f in missing:
         X[f] = np.nan
     X = X[feature_list]  # reorder to match training order
+
+    # Reject if too many features are NaN (likely insufficient warmup)
+    nan_count = int(X.iloc[0].isna().sum())
+    if nan_count > len(feature_list) * 0.3:
+        raise ValueError(
+            f"Latest row has {nan_count}/{len(feature_list)} NaN features "
+            f"({nan_count / len(feature_list):.0%}) — likely insufficient warmup")
 
     # Load and predict — LightGBM
     lgb_model = joblib.load(lgb_path)

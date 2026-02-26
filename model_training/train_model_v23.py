@@ -51,7 +51,8 @@ LOG_DIR = os.path.join("model_training", "logs")
 RESULTS_FILE = os.path.join(LOG_DIR, "training_results_v23.txt")
 MODEL_DIR = os.path.join("models", "v23")
 
-FEE_MAKER_RT = 0.0004
+FEE_RT = 0.0010  # 10 bps round-trip (taker fee + slippage + funding drag)
+SLIPPAGE_BPS = 3  # additional per-side slippage in basis points
 N_SPLITS = 10
 
 # Load v22 Optuna params
@@ -173,55 +174,58 @@ OPTUNA_TARGETS = [
 ]
 
 # All 39 v22 models + 5 new candidates = 44
+# NOTE: top_pct set to None for ALL models to align backtest with live
+# signal_generator.py behavior (which uses only fixed prob_threshold).
+# See code_review_findings.md issue 2.1.
 ALL_MODELS = [
     # Original v15-v19 models (25)
-    ("up_12_0002_p45t20",  "target_up_12_0002",  12, 0.45, 0.20, 2),
-    ("up_12_0002_p40t10",  "target_up_12_0002",  12, 0.40, 0.10, 2),
-    ("up_12_0003_p35t10",  "target_up_12_0003",  12, 0.35, 0.10, 2),
-    ("up_12_0003_p40t10",  "target_up_12_0003",  12, 0.40, 0.10, 2),
-    ("up_12_0003_p35t20",  "target_up_12_0003",  12, 0.35, 0.20, 2),
-    ("up_12_0005_p40t20",  "target_up_12_0005",  12, 0.40, 0.20, 2),
+    ("up_12_0002_p45t20",  "target_up_12_0002",  12, 0.45, None, 2),
+    ("up_12_0002_p40t10",  "target_up_12_0002",  12, 0.40, None, 2),
+    ("up_12_0003_p35t10",  "target_up_12_0003",  12, 0.35, None, 2),
+    ("up_12_0003_p40t10",  "target_up_12_0003",  12, 0.40, None, 2),
+    ("up_12_0003_p35t20",  "target_up_12_0003",  12, 0.35, None, 2),
+    ("up_12_0005_p40t20",  "target_up_12_0005",  12, 0.40, None, 2),
     ("up_12_0005_p35all",  "target_up_12_0005",  12, 0.35, None, 2),
-    ("up_24_0002_p40t10",  "target_up_24_0002",  24, 0.40, 0.10, 2),
-    ("up_24_0002_p35t20",  "target_up_24_0002",  24, 0.35, 0.20, 2),
-    ("up_24_0002_p45t10",  "target_up_24_0002",  24, 0.45, 0.10, 2),
-    ("up_24_0003_p35t10",  "target_up_24_0003",  24, 0.35, 0.10, 2),
-    ("up_24_0003_p40t10",  "target_up_24_0003",  24, 0.40, 0.10, 2),
-    ("up_24_0003_p35t20",  "target_up_24_0003",  24, 0.35, 0.20, 2),
-    ("up_36_0002_p35t20",  "target_up_36_0002",  36, 0.35, 0.20, 2),
-    ("up_36_0002_p40t10",  "target_up_36_0002",  36, 0.40, 0.10, 2),
-    ("up_36_0003_p40t10",  "target_up_36_0003",  36, 0.40, 0.10, 2),
-    ("up_48_0002_p40t10",  "target_up_48_0002",  48, 0.40, 0.10, 2),
-    ("up_48_0002_p35t10",  "target_up_48_0002",  48, 0.35, 0.10, 2),
-    ("fav_12_0005_p35t20", "target_favorable_12_0005", 12, 0.35, 0.20, 2),
-    ("fav_12_0003_p40t10", "target_favorable_12_0003", 12, 0.40, 0.10, 2),
-    ("fav_36_0003_p40t10", "target_favorable_36_0003", 36, 0.40, 0.10, 2),
-    ("up_36_0002_p45t10",  "target_up_36_0002",  36, 0.45, 0.10, 2),
-    ("up_24_0003_p45t10",  "target_up_24_0003",  24, 0.45, 0.10, 2),
+    ("up_24_0002_p40t10",  "target_up_24_0002",  24, 0.40, None, 2),
+    ("up_24_0002_p35t20",  "target_up_24_0002",  24, 0.35, None, 2),
+    ("up_24_0002_p45t10",  "target_up_24_0002",  24, 0.45, None, 2),
+    ("up_24_0003_p35t10",  "target_up_24_0003",  24, 0.35, None, 2),
+    ("up_24_0003_p40t10",  "target_up_24_0003",  24, 0.40, None, 2),
+    ("up_24_0003_p35t20",  "target_up_24_0003",  24, 0.35, None, 2),
+    ("up_36_0002_p35t20",  "target_up_36_0002",  36, 0.35, None, 2),
+    ("up_36_0002_p40t10",  "target_up_36_0002",  36, 0.40, None, 2),
+    ("up_36_0003_p40t10",  "target_up_36_0003",  36, 0.40, None, 2),
+    ("up_48_0002_p40t10",  "target_up_48_0002",  48, 0.40, None, 2),
+    ("up_48_0002_p35t10",  "target_up_48_0002",  48, 0.35, None, 2),
+    ("fav_12_0005_p35t20", "target_favorable_12_0005", 12, 0.35, None, 2),
+    ("fav_12_0003_p40t10", "target_favorable_12_0003", 12, 0.40, None, 2),
+    ("fav_36_0003_p40t10", "target_favorable_36_0003", 36, 0.40, None, 2),
+    ("up_36_0002_p45t10",  "target_up_36_0002",  36, 0.45, None, 2),
+    ("up_24_0003_p45t10",  "target_up_24_0003",  24, 0.45, None, 2),
     ("up_12_0002_p45all",  "target_up_12_0002",  12, 0.45, None, 2),
-    ("up_48_0002_p35t20",  "target_up_48_0002",  48, 0.35, 0.20, 2),
+    ("up_48_0002_p35t20",  "target_up_48_0002",  48, 0.35, None, 2),
     # v20 new models (6)
-    ("up_48_0003_p35t10",  "target_up_48_0003",  48, 0.35, 0.10, 2),
-    ("up_48_0003_p40t10",  "target_up_48_0003",  48, 0.40, 0.10, 2),
-    ("up_24_0005_p35t10",  "target_up_24_0005",  24, 0.35, 0.10, 2),
-    ("up_24_0005_p40t10",  "target_up_24_0005",  24, 0.40, 0.10, 2),
-    ("up_36_0005_p35t10",  "target_up_36_0005",  36, 0.35, 0.10, 2),
-    ("fav_36_0005_p35t10", "target_favorable_36_0005", 36, 0.35, 0.10, 2),
+    ("up_48_0003_p35t10",  "target_up_48_0003",  48, 0.35, None, 2),
+    ("up_48_0003_p40t10",  "target_up_48_0003",  48, 0.40, None, 2),
+    ("up_24_0005_p35t10",  "target_up_24_0005",  24, 0.35, None, 2),
+    ("up_24_0005_p40t10",  "target_up_24_0005",  24, 0.40, None, 2),
+    ("up_36_0005_p35t10",  "target_up_36_0005",  36, 0.35, None, 2),
+    ("fav_36_0005_p35t10", "target_favorable_36_0005", 36, 0.35, None, 2),
     # v21 models (8 — excluding up_24_001_p40t10 which dropped in v22)
-    ("up_48_0005_p35t10",  "target_up_48_0005",  48, 0.35, 0.10, 2),
-    ("up_24_001_p35t10",   "target_up_24_001",   24, 0.35, 0.10, 2),
-    ("up_6_0002_p40t10",   "target_up_6_0002",   6, 0.40, 0.10, 2),
-    ("up_6_0002_p35t20",   "target_up_6_0002",   6, 0.35, 0.20, 2),
-    ("up_6_0003_p35t10",   "target_up_6_0003",   6, 0.35, 0.10, 2),
-    ("up_6_0003_p40t10",   "target_up_6_0003",   6, 0.40, 0.10, 2),
-    ("up_6_0005_p35t10",   "target_up_6_0005",   6, 0.35, 0.10, 2),
-    ("up_6_0005_p40t10",   "target_up_6_0005",   6, 0.40, 0.10, 2),
+    ("up_48_0005_p35t10",  "target_up_48_0005",  48, 0.35, None, 2),
+    ("up_24_001_p35t10",   "target_up_24_001",   24, 0.35, None, 2),
+    ("up_6_0002_p40t10",   "target_up_6_0002",   6, 0.40, None, 2),
+    ("up_6_0002_p35t20",   "target_up_6_0002",   6, 0.35, None, 2),
+    ("up_6_0003_p35t10",   "target_up_6_0003",   6, 0.35, None, 2),
+    ("up_6_0003_p40t10",   "target_up_6_0003",   6, 0.40, None, 2),
+    ("up_6_0005_p35t10",   "target_up_6_0005",   6, 0.35, None, 2),
+    ("up_6_0005_p40t10",   "target_up_6_0005",   6, 0.40, None, 2),
     # v23 NEW CANDIDATES (5)
-    ("up_6_0005_p45t10",   "target_up_6_0005",   6, 0.45, 0.10, 2),  # Tighter on best AUC (0.772)
-    ("up_6_0005_p50t10",   "target_up_6_0005",   6, 0.50, 0.10, 2),  # Very tight on best AUC
-    ("up_6_0003_p45t10",   "target_up_6_0003",   6, 0.45, 0.10, 2),  # Tighter on 0.3%
-    ("up_6_001_p35t10",    "target_up_6_001",    6, 0.35, 0.10, 2),  # 30-min 1% threshold
-    ("up_6_001_p40t10",    "target_up_6_001",    6, 0.40, 0.10, 2),  # 30-min 1% threshold tighter
+    ("up_6_0005_p45t10",   "target_up_6_0005",   6, 0.45, None, 2),  # Tighter on best AUC (0.772)
+    ("up_6_0005_p50t10",   "target_up_6_0005",   6, 0.50, None, 2),  # Very tight on best AUC
+    ("up_6_0003_p45t10",   "target_up_6_0003",   6, 0.45, None, 2),  # Tighter on 0.3%
+    ("up_6_001_p35t10",    "target_up_6_001",    6, 0.35, None, 2),  # 30-min 1% threshold
+    ("up_6_001_p40t10",    "target_up_6_001",    6, 0.40, None, 2),  # 30-min 1% threshold tighter
 ]
 
 
@@ -319,15 +323,17 @@ def wf_split_data(df, feat_cols, target_col, train_end, test_start, test_end, pu
 
 
 def backtest_threshold(close, y_prob, horizon, fee_rt, prob_threshold, top_pct=None,
-                       hours=None):
+                       hours=None, slippage_bps=SLIPPAGE_BPS):
     n = len(close)
+    # Total cost per trade: round-trip fee + slippage on entry and exit
+    total_cost = fee_rt + 2 * slippage_bps / 10_000
     candidates = []
     i = 0
     while i + horizon < n:
         if y_prob[i] > prob_threshold:
             raw_ret = (close[i + horizon] - close[i]) / close[i]
             candidates.append({"idx": i, "prob": y_prob[i], "raw_ret": raw_ret,
-                               "net_ret": raw_ret - fee_rt,
+                               "net_ret": raw_ret - total_cost,
                                "hour": int(hours[i]) if hours is not None else -1})
         i += horizon
     if not candidates:
@@ -568,7 +574,7 @@ def main():
                 continue
 
             opt_feats = get_feats(tgt_name, 100)
-            purge = 2 * horizon
+            purge = max(2 * horizon, 288)  # at least 288 candles (24h) for rolling window decay
             log(f"\n  Optimizing {tgt_name} ({len(opt_feats)} features, {n_trials} trials, horizon={horizon})...", f)
 
             opt_splits = []
@@ -605,11 +611,14 @@ def main():
                         "path_smooth": trial.suggest_float("path_smooth", 1.0, 30.0),
                     }
                     aucs = []
+                    # Evaluate on VALIDATION set, NOT test set, to avoid
+                    # optimizing hyperparameters on the same data used for
+                    # final performance evaluation (test-set overfitting).
                     for X_tr, y_tr, X_va, y_va, X_te, y_te, _, _ in splits:
                         try:
                             model = train_lgb(X_tr, y_tr, X_va, y_va, params=params)
-                            p = model.predict_proba(X_te)[:, 1]
-                            aucs.append(auc_roc(y_te, p))
+                            p = model.predict_proba(X_va)[:, 1]
+                            aucs.append(auc_roc(y_va, p))
                         except Exception:
                             return 0.5
                     return np.mean(aucs)
@@ -722,7 +731,7 @@ def main():
                 continue
 
             feat = get_feats(name)
-            purge = purge_mult * horizon
+            purge = max(purge_mult * horizon, 288)  # at least 288 candles (24h) for rolling window decay
             lgb_params = get_params(name)
             use_ens, lgb_w = get_ens_config(name)
             model_results = {}
@@ -750,7 +759,7 @@ def main():
                         p_test = lgb_w * p_test + (1 - lgb_w) * p_cb
 
                 auc = auc_roc(y_te, p_test)
-                trades = backtest_threshold(close_te, p_test, horizon, FEE_MAKER_RT,
+                trades = backtest_threshold(close_te, p_test, horizon, FEE_RT,
                                            prob_thresh, top_pct, hours=hour_te)
                 model_results[s] = {"trades": trades, "auc": auc, "horizon": horizon}
 
@@ -1120,7 +1129,7 @@ def main():
         prod_config = {
             "config_name": best_cfg, "dd_limit": max_dd,
             "cooldown": cooldown, "max_concurrent": max_conc,
-            "position_scale": pos_scale, "fee_rt": FEE_MAKER_RT,
+            "position_scale": pos_scale, "fee_rt": FEE_RT,
             "quality_weighting": True, "recent_weighted": True,
             "v23_optimized_targets": list(optimized_params.keys()),
             "v22_optimized_targets": list(V22_OPTUNA_PARAMS.keys()),

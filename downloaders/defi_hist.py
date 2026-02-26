@@ -13,8 +13,8 @@ from downloaders.base import BaseDownloader
 class DefiDownloader(BaseDownloader):
     name = "defi"
 
-    def __init__(self, full=False):
-        super().__init__(full=full)
+    def __init__(self, full=False, **kwargs):
+        super().__init__(full=full, **kwargs)
         self.stablecoin_url = self.cfg.get("stablecoin_url",
                                            "https://stablecoins.llama.fi/stablecoins")
         self.tvl_url = self.cfg.get("tvl_url",

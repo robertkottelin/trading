@@ -15,8 +15,8 @@ from downloaders.base import BaseDownloader
 class OkxDownloader(BaseDownloader):
     name = "okx"
 
-    def __init__(self, full=False):
-        super().__init__(full=full)
+    def __init__(self, full=False, **kwargs):
+        super().__init__(full=full, **kwargs)
         self.base_url = self.cfg.get("base_url", "https://www.okx.com")
         self.delay = self.cfg.get("rate_limit_delay", 0.5)
         self.inst_id = "BTC-USDT-SWAP"

@@ -19,8 +19,8 @@ from downloaders.base import BaseDownloader
 class CoinalyzeDownloader(BaseDownloader):
     name = "coinalyze"
 
-    def __init__(self, full=False):
-        super().__init__(full=full)
+    def __init__(self, full=False, **kwargs):
+        super().__init__(full=full, **kwargs)
         self.base_url = self.cfg.get("base_url", "https://api.coinalyze.net/v1")
         self.symbol = self.cfg.get("symbol", "BTCUSDT_PERP.A")
         self.delay = self.cfg.get("rate_limit_delay", 1.5)
@@ -55,8 +55,11 @@ class CoinalyzeDownloader(BaseDownloader):
             raise RuntimeError("COINALYZE_API_KEY environment variable is required")
 
         # Determine start
-        start_dt = datetime.strptime(self.start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-        if not self.full:
+        if self.start_override_ms:
+            start_dt = datetime.fromtimestamp(self.start_override_ms / 1000, tz=timezone.utc)
+        else:
+            start_dt = datetime.strptime(self.start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        if not self.full and not self.start_override_ms:
             last_ts = self._get_last_timestamp_ms(filename, "timestamp_ms")
             if last_ts:
                 start_dt = datetime.fromtimestamp(last_ts / 1000, tz=timezone.utc)

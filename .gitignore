@@ -1,6 +1,7 @@
 # Data files (too large for git)
 raw_data/
 processed_data/
+market_context_data/
 models/
 downloaders/logs/
 model_training/logs/
@@ -32,6 +33,11 @@ config/settings.local.yaml
 .idea/
 *.swp
 *.swo
+
+# LLM Agent
+llm_agent/decision.json
+llm_agent/decision_history.json
+llm_agent/logs/
 
 # Claude Code
 .claude_tmp/

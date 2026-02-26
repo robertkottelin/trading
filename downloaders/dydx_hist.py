@@ -16,8 +16,8 @@ from downloaders.base import BaseDownloader
 class DydxDownloader(BaseDownloader):
     name = "dydx"
 
-    def __init__(self, full=False):
-        super().__init__(full=full)
+    def __init__(self, full=False, **kwargs):
+        super().__init__(full=full, **kwargs)
         self.base_url = self.cfg.get("base_url", "https://indexer.dydx.trade/v4")
         self.market = self.cfg.get("market", "BTC-USD")
         self.start_date = self.cfg.get("start_date", "2023-10-01")
@@ -416,6 +416,18 @@ class DydxDownloader(BaseDownloader):
         # Trades skipped — tick-level backfill too slow
 
         # Snapshots always append
+        self._download_orderbook()
+        self._download_market_stats()
+
+    def download_recent(self, hours=24):
+        """Download only recent data using start_override_iso."""
+        from_iso = self.start_override_iso
+        candles = self._download_candles(from_iso=from_iso)
+        self._save_candles(candles)
+
+        funding = self._download_funding(from_iso=from_iso)
+        self._save_funding(funding)
+
         self._download_orderbook()
         self._download_market_stats()
 

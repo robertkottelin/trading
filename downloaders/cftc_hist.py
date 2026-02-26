@@ -28,8 +28,8 @@ class CftcDownloader(BaseDownloader):
     # CME Bitcoin Futures market name
     BTC_MARKET = "BITCOIN - CHICAGO MERCANTILE EXCHANGE"
 
-    def __init__(self, full=False):
-        super().__init__(full=full)
+    def __init__(self, full=False, **kwargs):
+        super().__init__(full=full, **kwargs)
         self.delay = self.cfg.get("rate_limit_delay", 1.0)
 
     def _download_cot(self):

@@ -13,8 +13,8 @@ from downloaders.base import BaseDownloader
 class BtcNetworkDownloader(BaseDownloader):
     name = "btc_network"
 
-    def __init__(self, full=False):
-        super().__init__(full=full)
+    def __init__(self, full=False, **kwargs):
+        super().__init__(full=full, **kwargs)
         self.base_url = self.cfg.get("mempool_base_url", "https://mempool.space/api")
         self.delay = self.cfg.get("rate_limit_delay", 0.5)
 

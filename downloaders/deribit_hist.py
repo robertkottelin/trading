@@ -18,8 +18,8 @@ from downloaders.base import BaseDownloader
 class DeribitDownloader(BaseDownloader):
     name = "deribit"
 
-    def __init__(self, full=False):
-        super().__init__(full=full)
+    def __init__(self, full=False, **kwargs):
+        super().__init__(full=full, **kwargs)
         self.base_url = self.cfg.get("base_url", "https://www.deribit.com/api/v2")
         self.delay = self.cfg.get("rate_limit_delay", 0.5)
 
@@ -42,9 +42,9 @@ class DeribitDownloader(BaseDownloader):
         # Historical DVOL via get_volatility_index_data endpoint
         end_ts = int(datetime.now(timezone.utc).timestamp() * 1000)
         # DVOL available since ~2021
-        start_ts = int(datetime(2021, 3, 1, tzinfo=timezone.utc).timestamp() * 1000)
+        start_ts = self.start_override_ms or int(datetime(2021, 3, 1, tzinfo=timezone.utc).timestamp() * 1000)
 
-        if not self.full:
+        if not self.full and not self.start_override_ms:
             last_ms = self._get_last_timestamp_ms("deribit_dvol.csv", "timestamp_ms")
             if last_ms:
                 start_ts = last_ms + 3600000  # advance 1 hour to avoid overlap
@@ -248,9 +248,9 @@ class DeribitDownloader(BaseDownloader):
         self.log.info("  Downloading Deribit perpetual funding rates...")
 
         final_ts = int(datetime.now(timezone.utc).timestamp() * 1000)
-        start_ts = int(datetime(2021, 1, 1, tzinfo=timezone.utc).timestamp() * 1000)
+        start_ts = self.start_override_ms or int(datetime(2021, 1, 1, tzinfo=timezone.utc).timestamp() * 1000)
 
-        if not self.full:
+        if not self.full and not self.start_override_ms:
             last_ms = self._get_last_timestamp_ms("deribit_funding_rates.csv", "timestamp_ms")
             if last_ms:
                 start_ts = last_ms
@@ -314,6 +314,17 @@ class DeribitDownloader(BaseDownloader):
         self._download_funding()
 
     def download_incremental(self):
+        self._download_dvol()
+        self._download_options_summary()
+        self._download_futures_summary()
+        self._download_historical_vol()
+        self._download_funding()
+
+    def download_recent(self, hours=24):
+        """Download only recent data. Snapshots + recent DVOL/funding."""
+        # The internal methods check CSV for last timestamp (empty in
+        # market_context_data/) and fall back to hardcoded dates.
+        # We override the full flag to force using start_override_ms as base.
         self._download_dvol()
         self._download_options_summary()
         self._download_futures_summary()

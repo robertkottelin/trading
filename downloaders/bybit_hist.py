@@ -15,8 +15,8 @@ from downloaders.base import BaseDownloader
 class BybitDownloader(BaseDownloader):
     name = "bybit"
 
-    def __init__(self, full=False):
-        super().__init__(full=full)
+    def __init__(self, full=False, **kwargs):
+        super().__init__(full=full, **kwargs)
         self.base_url = self.cfg.get("base_url", "https://api.bybit.com")
         self.delay = self.cfg.get("rate_limit_delay", 0.5)
         self.symbol = "BTCUSDT"
@@ -38,8 +38,8 @@ class BybitDownloader(BaseDownloader):
         """
         self.log.info("  Downloading Bybit klines...")
 
-        start_ms = int(datetime(2020, 3, 1, tzinfo=timezone.utc).timestamp() * 1000)
-        if not self.full:
+        start_ms = self.start_override_ms or int(datetime(2020, 3, 1, tzinfo=timezone.utc).timestamp() * 1000)
+        if not self.full and not self.start_override_ms:
             last_ms = self._get_last_timestamp_ms("bybit_klines_5m.csv", "open_time_ms")
             if last_ms:
                 start_ms = last_ms + 300000
@@ -122,8 +122,8 @@ class BybitDownloader(BaseDownloader):
         """
         self.log.info("  Downloading Bybit funding rates...")
 
-        start_ms = int(datetime(2020, 3, 1, tzinfo=timezone.utc).timestamp() * 1000)
-        if not self.full:
+        start_ms = self.start_override_ms or int(datetime(2020, 3, 1, tzinfo=timezone.utc).timestamp() * 1000)
+        if not self.full and not self.start_override_ms:
             last_ms = self._get_last_timestamp_ms("bybit_funding_rates.csv", "funding_time_ms")
             if last_ms:
                 start_ms = last_ms + 1
@@ -194,8 +194,8 @@ class BybitDownloader(BaseDownloader):
         self.log.info("  Downloading Bybit open interest...")
 
         # Bybit OI history only provides recent data
-        start_ms = int((datetime.now(timezone.utc) - timedelta(days=200)).timestamp() * 1000)
-        if not self.full:
+        start_ms = self.start_override_ms or int((datetime.now(timezone.utc) - timedelta(days=200)).timestamp() * 1000)
+        if not self.full and not self.start_override_ms:
             last_ms = self._get_last_timestamp_ms("bybit_open_interest.csv", "timestamp_ms")
             if last_ms:
                 start_ms = last_ms + 1

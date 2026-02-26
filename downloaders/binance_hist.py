@@ -15,8 +15,8 @@ from downloaders.base import BaseDownloader
 class BinanceDownloader(BaseDownloader):
     name = "binance"
 
-    def __init__(self, full=False):
-        super().__init__(full=full)
+    def __init__(self, full=False, **kwargs):
+        super().__init__(full=full, **kwargs)
         self.spot_base = self.cfg.get("spot_base_url", "https://api.binance.com")
         self.futures_base = self.cfg.get("futures_base_url", "https://fapi.binance.com")
         self.spot_ticker = self.cfg.get("spot_ticker", "BTCUSDT")
@@ -355,6 +355,18 @@ class BinanceDownloader(BaseDownloader):
         self._download_all_klines()
         self._download_funding_rates()
         self._download_all_analytics()  # always re-fetch 30-day window
+
+    def download_recent(self, hours=24):
+        """Download only recent data. Uses start_override_ms to limit range."""
+        # For klines, start_override_ms overrides since _download_klines checks
+        # CSV (which will be empty in market_context_data/) and falls back to
+        # config start dates. We override those to use start_override_ms.
+        if self.start_override_ms:
+            self.spot_start_ms = self.start_override_ms
+            self.futures_start_ms = self.start_override_ms
+        self._download_all_klines()
+        self._download_funding_rates()
+        self._download_all_analytics()
 
 
 if __name__ == "__main__":

@@ -16,8 +16,8 @@ from downloaders.base import BaseDownloader
 class HyperliquidDownloader(BaseDownloader):
     name = "hyperliquid"
 
-    def __init__(self, full=False):
-        super().__init__(full=full)
+    def __init__(self, full=False, **kwargs):
+        super().__init__(full=full, **kwargs)
         self.base_url = self.cfg.get("base_url", "https://api.hyperliquid.xyz")
         self.delay = self.cfg.get("rate_limit_delay", 0.5)
 
@@ -113,8 +113,8 @@ class HyperliquidDownloader(BaseDownloader):
         self.log.info("  Downloading Hyperliquid BTC funding history...")
 
         # Hyperliquid launched ~Nov 2023; funding history available since then
-        start_ms = int(datetime(2023, 11, 1, tzinfo=timezone.utc).timestamp() * 1000)
-        if not self.full:
+        start_ms = self.start_override_ms or int(datetime(2023, 11, 1, tzinfo=timezone.utc).timestamp() * 1000)
+        if not self.full and not self.start_override_ms:
             last_ms = self._get_last_timestamp_ms(
                 "hyperliquid_funding_rates.csv", "timestamp_ms")
             if last_ms:

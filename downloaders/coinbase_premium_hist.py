@@ -15,8 +15,8 @@ from downloaders.base import BaseDownloader
 class CoinbasePremiumDownloader(BaseDownloader):
     name = "coinbase_premium"
 
-    def __init__(self, full=False):
-        super().__init__(full=full)
+    def __init__(self, full=False, **kwargs):
+        super().__init__(full=full, **kwargs)
         self.delay = self.cfg.get("rate_limit_delay", 0.3)
 
     def _download_premium_snapshot(self):

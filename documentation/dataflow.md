@@ -109,21 +109,7 @@ flowchart LR
 
 ## Live Trading Pipeline
 
-Runs continuously. All data fetched via REST API polling. The main loop polls the dYdX Indexer API for completed 5-minute candles, supplementary data fetched via REST polling, features recompute on each **5-minute candle close**, all models score, conventional strategies evaluate, and the LLM makes the final trading decision.
-
-### Timing
-
-Features compute on the 5m grid. All 25 production models (v23) score every candle, but **quality weighting** makes the shorter-horizon models dominant:
-
-| Horizon | Models | AUC range | Role |
-|---------|--------|-----------|------|
-| **30m** (6 candles) | `up_6_*` | 0.77–0.85 | Goldmine — all candidates pass. `up_6_001` has highest AUC (0.85). |
-| **1h** (12 candles) | `up_12_*`, `fav_12_*` | 0.63–0.72 | Primary weight. Highest Sharpe, most consistent. |
-| **2h** (24 candles) | `up_24_*` | 0.61–0.63 | Secondary. Good diversification. |
-| **3h** (36 candles) | `up_36_*` | 0.59–0.61 | Tertiary. Catches larger moves. |
-| **4h** (48 candles) | `up_48_*` | 0.58 | Low weight but highest raw returns per trade (+7–9%). |
-
-The effective trading rhythm is roughly hourly — the bot evaluates every 5 minutes, but 1h models drive most decisions.
+Runs continuously. All data fetched via REST API polling. The main loop polls the dYdX Indexer API for completed 5-minute candles, supplementary data fetched via REST polling, features recompute on each **5-minute candle close**, all models score, and the LLM makes the final trading decision.
 
 ### Architecture
 
@@ -160,14 +146,6 @@ flowchart TB
         ENS --> SF
     end
 
-    subgraph StrategyLayer["Conventional Strategy Layer"]
-        CS["Conventional Strategies<br/><i>strategy/conventional.py</i>"]
-        CSF[("conventional_signals.jsonl")]
-        FF --> CS
-        DP -->|"funding, OI, liqs"| CS
-        CS --> CSF
-    end
-
     subgraph PortfolioLayer["Portfolio Layer"]
         PF["Portfolio Fetcher<br/><i>execution/dydx_client.py</i>"]
         PS[("portfolio.jsonl")]
@@ -178,15 +156,12 @@ flowchart TB
 
     subgraph DecisionLayer["Decision Layer"]
         LLM["LLM Reasoning Agent<br/><i>strategy/llm_agent.py</i><br/>Grok 4.2 Reasoning"]
-        SR["Safety Rails<br/><i>strategy/safety_rails.py</i>"]
         DF[("decisions.jsonl")]
         SF --> LLM
-        CSF -->|"conventional signals"| LLM
         MCS -->|"price, volume,<br/>derivatives, macro"| LLM
         PS --> LLM
         LLM <-->|"web_search +<br/>x_search (native)"| INET(("Internet<br/>+ X/Twitter"))
-        LLM --> SR
-        SR --> DF
+        LLM --> DF
     end
 
     subgraph ExecutionLayer["Execution Layer"]

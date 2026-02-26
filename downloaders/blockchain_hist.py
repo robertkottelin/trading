@@ -36,8 +36,8 @@ class BlockchainDownloader(BaseDownloader):
         "output_volume": "output-volume",
     }
 
-    def __init__(self, full=False):
-        super().__init__(full=full)
+    def __init__(self, full=False, **kwargs):
+        super().__init__(full=full, **kwargs)
         self.base_url = "https://api.blockchain.info/charts"
         self.delay = self.cfg.get("rate_limit_delay", 10.0)  # 1 req/10s
 
@@ -100,6 +100,27 @@ class BlockchainDownloader(BaseDownloader):
         # Re-fetch all — each chart is a single request returning full history.
         # With 16 charts at 10s rate limit = ~3 min total. Not worth optimizing.
         self._download_all_charts()
+
+    def download_recent(self, hours=24):
+        """Download last 7 days of on-chain metrics."""
+        self.log.info("  Downloading blockchain.com on-chain metrics (7d, %d charts)...",
+                      len(self.CHARTS))
+        all_series = []
+        for col_name, chart_name in self.CHARTS.items():
+            self.log.info("    Downloading %s (7d)...", chart_name)
+            s = self._download_chart(chart_name, col_name, timespan="7days")
+            if not s.empty:
+                # Some charts (mempool_size, utxo_count, total_bitcoins) return
+                # per-block data even at 7days, creating many entries per date.
+                # Keep only the last value per date.
+                s = s.groupby(s.index).last()
+                all_series.append(s)
+        if all_series:
+            df = pd.concat(all_series, axis=1)
+            df.index.name = "date"
+            df = df.reset_index()
+            self._save_csv(df, "blockchain_onchain.csv", "blockchain.com on-chain (7d)",
+                           sort_by="date", dedup_col="date")
 
 
 if __name__ == "__main__":

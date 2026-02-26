@@ -60,8 +60,8 @@ class MacroDownloader(BaseDownloader):
         },
     }
 
-    def __init__(self, full=False):
-        super().__init__(full=full)
+    def __init__(self, full=False, **kwargs):
+        super().__init__(full=full, **kwargs)
         self.fred_url = self.cfg.get("fred_base_url",
                                      "https://api.stlouisfed.org/fred/series/observations")
         self.fred_key = os.environ.get("FRED_API_KEY", "")
@@ -225,6 +225,66 @@ class MacroDownloader(BaseDownloader):
     def download_incremental(self):
         # Same as full but start dates adjusted internally
         self.download_all()
+
+    def download_recent(self, hours=24):
+        """Download recent macro data — last 7 days for daily sources."""
+        if yf is not None:
+            for filename, cfg in self.YF_GROUPS.items():
+                tickers = cfg["tickers"]
+                desc = cfg["description"]
+                self.log.info("  Downloading recent %s via yfinance...", desc)
+                try:
+                    data = yf.download(tickers, period="5d", group_by="ticker",
+                                       auto_adjust=True, progress=False, threads=True)
+                except Exception as e:
+                    self.log.error("  yfinance recent %s failed: %s", desc, e)
+                    continue
+
+                rows_dict = {}
+                if len(tickers) == 1:
+                    ticker = tickers[0]
+                    safe_name = ticker.replace("^", "").replace("=", "").replace("-", "").replace(".", "")
+                    if not data.empty:
+                        for col in ["Open", "High", "Low", "Close", "Volume"]:
+                            if col in data.columns:
+                                rows_dict[f"{safe_name}_{col.lower()}"] = data[col]
+                else:
+                    for ticker in tickers:
+                        safe_name = ticker.replace("^", "").replace("=", "").replace("-", "").replace(".", "")
+                        try:
+                            if ticker in data.columns.get_level_values(0):
+                                ticker_data = data[ticker]
+                                for col in ["Open", "High", "Low", "Close", "Volume"]:
+                                    if col in ticker_data.columns:
+                                        rows_dict[f"{safe_name}_{col.lower()}"] = ticker_data[col]
+                        except Exception:
+                            pass
+
+                if rows_dict:
+                    df = pd.DataFrame(rows_dict)
+                    df.index.name = "date"
+                    df = df.reset_index()
+                    df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
+                    self._save_csv(df, filename, desc, sort_by="date", dedup_col="date")
+
+        # FRED: last 7 days
+        if self.fred_key:
+            recent_start = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
+            for filename, cfg in self.FRED_GROUPS.items():
+                series_list = cfg["series"]
+                desc = cfg["description"]
+                self.log.info("  Downloading recent FRED %s...", desc)
+                all_series = []
+                for sid in series_list:
+                    s = self._download_fred_series(sid, recent_start)
+                    if not s.empty:
+                        all_series.append(s)
+                if all_series:
+                    df = pd.concat(all_series, axis=1)
+                    df.index.name = "date"
+                    df = df.reset_index()
+                    df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
+                    self._save_csv(df, filename, f"FRED {desc}", sort_by="date", dedup_col="date")
 
 
 if __name__ == "__main__":

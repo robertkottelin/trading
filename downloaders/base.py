@@ -39,12 +39,21 @@ class BaseDownloader(abc.ABC):
 
     name: str = "base"  # override in subclass
 
-    def __init__(self, full: bool = False):
+    def __init__(self, full: bool = False, output_dir: str = None,
+                 start_override_ms: int = None):
         self.full = full
-        self.output_dir = OUTPUT_DIR
+        self.output_dir = Path(output_dir) if output_dir else OUTPUT_DIR
+        self.start_override_ms = start_override_ms
         os.makedirs(self.output_dir, exist_ok=True)
         self._load_config()
         self.setup_logging()
+
+    @property
+    def start_override_iso(self):
+        """Return start_override as ISO string, or None."""
+        if self.start_override_ms:
+            return self._ms_to_iso(self.start_override_ms)
+        return None
 
     # ---- Config -----------------------------------------------------------
 
@@ -318,6 +327,10 @@ class BaseDownloader(abc.ABC):
     @abc.abstractmethod
     def download_incremental(self):
         """Download only new data since last CSV row."""
+
+    def download_recent(self, hours=24):
+        """Download recent data only. Default: delegates to download_all."""
+        self.download_all()
 
     def run(self, full=None):
         """Entry point: download with timing and error wrapping."""

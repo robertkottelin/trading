@@ -80,11 +80,15 @@ def align_5m(df: pd.DataFrame, grid_ms: pd.Series,
 
 def align_ffill(df: pd.DataFrame, grid_ms: pd.Series,
                 ts_col: str, value_cols: list[str],
-                prefix: str) -> pd.DataFrame:
+                prefix: str, ffill_limit: int = 288) -> pd.DataFrame:
     """Forward-fill alignment for coarser-than-5m sources (hourly, 8h, etc).
 
     The source timestamp is floored to the nearest 5-minute boundary,
     merged onto the grid, and then forward-filled.
+
+    Args:
+        ffill_limit: Maximum number of 5-min candles to forward-fill (default 288 = 24h).
+                     Prevents stale values from propagating indefinitely through data gaps.
     """
     src = df[value_cols + [ts_col]].copy()
     src["ts_ms"] = ts_col_to_ms(src, ts_col)
@@ -101,12 +105,12 @@ def align_ffill(df: pd.DataFrame, grid_ms: pd.Series,
     rename = {c: f"{prefix}{c}" for c in value_cols}
     src = src.rename(columns=rename)
 
-    # Merge onto grid and ffill
+    # Merge onto grid and ffill (bounded to prevent stale value propagation)
     grid = pd.DataFrame({"open_time_ms": grid_ms})
     result = grid.merge(src, on="open_time_ms", how="left")
     for c in rename.values():
         if c in result.columns:
-            result[c] = result[c].ffill().astype(np.float32)
+            result[c] = result[c].ffill(limit=ffill_limit).astype(np.float32)
     return result
 
 
@@ -138,12 +142,12 @@ def align_daily(df: pd.DataFrame, grid_ms: pd.Series,
     rename = {c: f"{prefix}{c}" for c in value_cols}
     src = src.rename(columns=rename)
 
-    # Merge and ffill
+    # Merge and ffill (limit to 576 candles = 2 days for daily data)
     grid = pd.DataFrame({"open_time_ms": grid_ms})
     result = grid.merge(src, on="open_time_ms", how="left")
     for c in rename.values():
         if c in result.columns:
-            result[c] = result[c].ffill().astype(np.float32)
+            result[c] = result[c].ffill(limit=576).astype(np.float32)
     return result
 
 

@@ -113,7 +113,10 @@ class PaperExecutor:
             "?resolution=1MIN&limit=1"
         )
         if data and "candles" in data and data["candles"]:
-            return float(data["candles"][0]["close"])
+            price = float(data["candles"][0]["close"])
+            if price <= 0 or price != price:  # NaN check: NaN != NaN
+                raise RuntimeError(f"Invalid price from Indexer: {price}")
+            return price
         raise RuntimeError("Could not fetch current BTC price from Indexer")
 
     def _fetch_portfolio(self) -> dict:

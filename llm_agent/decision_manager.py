@@ -91,7 +91,7 @@ def resolve_pending() -> int:
         duration_min = entry.get("duration_minutes", 120)
         ts = entry.get("timestamp")
 
-        if not all([entry_price, tp, sl, ts]):
+        if not ts or not entry_price or entry_price <= 0 or not tp or not sl:
             continue
 
         klines = _load_klines_since(ts)

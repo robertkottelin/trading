@@ -308,11 +308,16 @@ class BaseDownloader(abc.ABC):
 
     @staticmethod
     def _iso_to_ms(iso_str):
-        """Parse ISO 8601 string to milliseconds."""
-        dt = pd.Timestamp(iso_str).to_pydatetime()
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return int(dt.timestamp() * 1000)
+        """Parse ISO 8601 string to milliseconds.
+
+        Handles both naive (assumed UTC) and timezone-aware strings correctly.
+        """
+        ts = pd.Timestamp(iso_str)
+        if ts.tzinfo is None:
+            ts = ts.tz_localize("UTC")
+        else:
+            ts = ts.tz_convert("UTC")
+        return int(ts.timestamp() * 1000)
 
     @staticmethod
     def _ms_to_iso(ms):

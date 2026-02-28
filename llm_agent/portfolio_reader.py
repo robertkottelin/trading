@@ -75,12 +75,19 @@ def get_portfolio() -> str:
                 market = pos.get("market", "?")
                 side = pos.get("side", "?")
                 size = pos.get("size", "0")
-                entry = pos.get("entryPrice", "?")
+                entry = pos.get("entryPrice", "0")
                 pnl = pos.get("unrealizedPnl", "0")
+                try:
+                    entry_str = f"entry=${float(entry):,.2f}"
+                except (ValueError, TypeError):
+                    entry_str = f"entry=N/A"
+                try:
+                    pnl_str = f"unrealizedPnL=${float(pnl):+,.2f}"
+                except (ValueError, TypeError):
+                    pnl_str = f"unrealizedPnL=N/A"
                 lines.append(
                     f"    {market} {side}: size={size}, "
-                    f"entry=${float(entry):,.2f}, "
-                    f"unrealizedPnL=${float(pnl):+,.2f}"
+                    f"{entry_str}, {pnl_str}"
                 )
         else:
             lines.append("  No open positions")
@@ -99,8 +106,12 @@ def get_portfolio() -> str:
                 ts = fill.get("createdAt", "?")[:19]
                 side = fill.get("side", "?")
                 size = fill.get("size", "?")
-                price = fill.get("price", "?")
-                lines.append(f"    {ts} {side} {size} BTC @ ${float(price):,.2f}")
+                price = fill.get("price", "0")
+                try:
+                    price_str = f"${float(price):,.2f}"
+                except (ValueError, TypeError):
+                    price_str = "N/A"
+                lines.append(f"    {ts} {side} {size} BTC @ {price_str}")
         else:
             lines.append("  No recent fills")
     else:

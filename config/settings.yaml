@@ -88,3 +88,25 @@ hyperliquid:
 cftc:
   max_retries: 3
   rate_limit_delay: 1.0
+
+# Execution settings — single source of truth for all execution parameters.
+# Overrides the hardcoded defaults scattered across executor/risk modules.
+execution:
+  mode: paper                          # "paper" or "live"
+  market: BTC-USD
+  network: mainnet
+  mainnet_rest_indexer: https://indexer.dydx.trade/v4
+  state_data_dir: state_data
+  # Position sizing
+  max_position_size_btc: 0.05
+  max_position_pct: 0.25               # max % of equity per trade
+  max_open_positions: 1
+  # Risk limits
+  confidence_threshold: 0.6
+  min_free_collateral_pct: 20.0
+  max_daily_loss_pct: 2.0
+  # Order parameters
+  market_order_slippage_pct: 0.05      # 5% slippage buffer for IOC limit orders
+  short_term_block_offset: 10
+  fill_poll_max_attempts: 10
+  fill_poll_interval_s: 2

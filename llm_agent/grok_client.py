@@ -107,6 +107,7 @@ def get_decision(prompt: str, enable_web_search: bool = True) -> dict:
             resp = requests.post(API_URL, headers=headers, json=payload, timeout=120)
 
             if resp.status_code == 429:
+                last_error = f"Rate limited (429) on attempt {attempt + 1}"
                 log.warning("Rate limited, waiting %ds...", RETRY_DELAY * (attempt + 1))
                 time.sleep(RETRY_DELAY * (attempt + 1))
                 continue
@@ -132,6 +133,11 @@ def get_decision(prompt: str, enable_web_search: bool = True) -> dict:
             log.warning(last_error)
             if attempt < MAX_RETRIES - 1:
                 time.sleep(RETRY_DELAY * (attempt + 1))
+        except (RuntimeError, TypeError) as e:
+            last_error = f"Response parsing failed: {e}"
+            log.warning(last_error)
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(RETRY_DELAY * (attempt + 1))
 
     raise RuntimeError(f"Grok API failed after {MAX_RETRIES} attempts: {last_error}")
 
@@ -147,7 +153,7 @@ def _extract_text(response_data: dict) -> str:
     for item in output:
         if item.get("type") == "message":
             for content in item.get("content", []):
-                if content.get("type") == "output_text":
+                if content.get("type") in ("text", "output_text"):
                     return content.get("text", "")
 
     # Fallback: try to find any text field
@@ -162,7 +168,7 @@ def _parse_decision(raw_text: str) -> dict:
         decision = json.loads(raw_text)
         _validate_decision(decision)
         return decision
-    except (json.JSONDecodeError, ValueError):
+    except (json.JSONDecodeError, ValueError, TypeError):
         pass
 
     # Try to extract JSON from markdown code block
@@ -238,10 +244,10 @@ def _validate_decision(decision: dict):
             raise ValueError(f"take_profit must be a positive finite number, got {tp}")
         if not isinstance(sl, (int, float)) or math.isnan(sl) or math.isinf(sl) or sl <= 0:
             raise ValueError(f"stop_loss must be a positive finite number, got {sl}")
-        if not (0 < size <= 1):
-            raise ValueError(f"position_size_pct must be in (0, 1], got {size}")
-        if dur <= 0:
-            raise ValueError(f"duration_minutes must be > 0, got {dur}")
+        if not isinstance(size, (int, float)) or math.isnan(size) or math.isinf(size) or not (0 < size <= 1):
+            raise ValueError(f"position_size_pct must be a finite number in (0, 1], got {size}")
+        if not isinstance(dur, (int, float)) or math.isnan(dur) or math.isinf(dur) or dur <= 0:
+            raise ValueError(f"duration_minutes must be a positive finite number, got {dur}")
 
         direction = decision["direction"]
         if direction == "LONG" and not (tp > entry > sl):

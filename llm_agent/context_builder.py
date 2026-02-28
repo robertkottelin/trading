@@ -11,7 +11,7 @@ import pandas as pd
 
 log = logging.getLogger(__name__)
 
-CONTEXT_DIR = Path("market_context_data")
+CONTEXT_DIR = Path(__file__).resolve().parent.parent / "market_context_data"
 
 
 def _read_csv(filename: str) -> pd.DataFrame | None:

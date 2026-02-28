@@ -65,24 +65,25 @@ class DydxExecutor:
         from placing duplicate orders.
         """
         os.makedirs(os.path.dirname(EXECUTION_LOCK_PATH), exist_ok=True)
-        lock_fd = open(EXECUTION_LOCK_PATH, "w")
+        lock_fd = open(EXECUTION_LOCK_PATH, "a")
         try:
-            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            lock_fd.close()
-            log.warning("Another execution is already in progress — skipping")
-            return {
-                "timestamp": _ts(),
-                "action": "REJECTED",
-                "rejection_reason": "concurrent execution blocked by lock",
-                "mode": "live",
-                "status": "REJECTED",
-            }
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                log.warning("Another execution is already in progress — skipping")
+                return {
+                    "timestamp": _ts(),
+                    "action": "REJECTED",
+                    "rejection_reason": "concurrent execution blocked by lock",
+                    "mode": "live",
+                    "status": "REJECTED",
+                }
 
-        try:
-            return await self._execute_decision_locked(decision)
+            try:
+                return await self._execute_decision_locked(decision)
+            finally:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
         finally:
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
             lock_fd.close()
 
     async def _execute_decision_locked(self, decision: dict | None = None) -> dict:
@@ -365,7 +366,7 @@ class DydxExecutor:
                 close_side = (
                     OrderSide.SELL if pos["side"] == "LONG" else OrderSide.BUY
                 )
-                size = float(pos["size"].replace("-", ""))
+                size = abs(float(pos.get("size", 0)))
                 await self._emergency_close(
                     {"size_btc": size, "direction": pos["side"]}, close_side
                 )
@@ -408,6 +409,8 @@ class DydxExecutor:
             limit_price = float(int(market_price * (1 + slippage_pct)) + 1)
         else:
             limit_price = float(int(market_price * (1 - slippage_pct)))
+            if limit_price <= 0:
+                limit_price = 1.0  # minimum valid price
 
         return {
             "direction": direction,
@@ -533,7 +536,7 @@ class DydxExecutor:
                 )
                 fills = fills_resp.get("fills", [])
                 for fill in fills:
-                    if fill.get("clientId") == str(client_id):
+                    if str(fill.get("clientId", "")) == str(client_id):
                         log.info("Fill confirmed (matched clientId) on attempt %d", attempt + 1)
                         return fill
             except Exception as e:
@@ -693,6 +696,8 @@ class DydxExecutor:
                 close_limit_price = float(int(close_market_price * (1 + slippage_pct)) + 1)
             else:
                 close_limit_price = float(int(close_market_price * (1 - slippage_pct)))
+                if close_limit_price <= 0:
+                    close_limit_price = 1.0
 
             block_height = await self.dydx.get_latest_block_height()
             good_til_block = block_height + self.cfg.get("short_term_block_offset", 10)

@@ -6,6 +6,7 @@ pending decisions by checking if TP/SL were hit or duration expired.
 
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -13,10 +14,11 @@ import pandas as pd
 
 log = logging.getLogger(__name__)
 
-AGENT_DIR = Path("llm_agent")
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+AGENT_DIR = _PROJECT_ROOT / "llm_agent"
 DECISION_FILE = AGENT_DIR / "decision.json"
 HISTORY_FILE = AGENT_DIR / "decision_history.json"
-CONTEXT_DIR = Path("market_context_data")
+CONTEXT_DIR = _PROJECT_ROOT / "market_context_data"
 
 
 def _load_json(path: Path) -> dict | list | None:
@@ -32,8 +34,10 @@ def _load_json(path: Path) -> dict | list | None:
 
 def _save_json(path: Path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
+    tmp = path.with_suffix(".tmp")
+    with open(tmp, "w") as f:
         json.dump(data, f, indent=2, default=str)
+    os.replace(tmp, path)
 
 
 def _load_history() -> list:
@@ -48,10 +52,12 @@ def _load_klines_since(ts_iso: str) -> pd.DataFrame | None:
         return None
     try:
         df = pd.read_csv(path)
-        if "timestamp" in df.columns:
-            df["_ts"] = pd.to_datetime(df["timestamp"], utc=True)
-            entry_ts = pd.Timestamp(ts_iso, tz="UTC")
-            df = df[df["_ts"] >= entry_ts].sort_values("_ts")
+        if "timestamp" not in df.columns:
+            log.warning("No 'timestamp' column in klines CSV")
+            return None
+        df["_ts"] = pd.to_datetime(df["timestamp"], utc=True)
+        entry_ts = pd.Timestamp(ts_iso, tz="UTC")
+        df = df[df["_ts"] > entry_ts].sort_values("_ts")  # exclude entry candle
         for col in ["high", "low", "close"]:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")

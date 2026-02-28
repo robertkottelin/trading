@@ -86,9 +86,11 @@ def run(args):
     _write_heartbeat("start")
 
     # --- Stage 0: Orphan order cleanup (live mode only) ---
-    exec_cfg = yaml.safe_load(
-        open("config/settings.yaml")
-    ).get("execution", {})
+    # Load config ONCE — reused by Stage 0 and Stage 7 to prevent
+    # race condition if config file is modified between stages.
+    with open("config/settings.yaml") as _cfg_f:
+        _full_cfg = yaml.safe_load(_cfg_f)
+    exec_cfg = _full_cfg.get("execution", {})
     mode = exec_cfg.get("mode", "paper")
     if mode == "live" and not args.no_execute:
         log.info("Stage 0/7: Checking for orphan orders...")
@@ -246,10 +248,7 @@ def run(args):
     if not args.no_execute:
         log.info("Stage 7/7: Executing trade...")
         try:
-            exec_cfg = yaml.safe_load(
-                open("config/settings.yaml")
-            ).get("execution", {})
-            mode = exec_cfg.get("mode", "paper")
+            # exec_cfg and mode already loaded once at Stage 0
             if mode == "paper":
                 from execution.paper_executor import PaperExecutor
                 trade = PaperExecutor().execute_decision(decision)

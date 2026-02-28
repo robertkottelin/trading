@@ -6,6 +6,7 @@ real-time web and X/Twitter sentiment data.
 
 import json
 import logging
+import math
 import os
 import time
 
@@ -174,16 +175,26 @@ def _parse_decision(raw_text: str) -> dict:
             except (json.JSONDecodeError, ValueError):
                 pass
 
-    # Try to find JSON object in text
+    # Try to find JSON object in text using balanced brace matching
     brace_start = raw_text.find("{")
-    brace_end = raw_text.rfind("}") + 1
-    if brace_start >= 0 and brace_end > brace_start:
-        try:
-            decision = json.loads(raw_text[brace_start:brace_end])
-            _validate_decision(decision)
-            return decision
-        except (json.JSONDecodeError, ValueError):
-            pass
+    if brace_start >= 0:
+        depth = 0
+        brace_end = -1
+        for i in range(brace_start, len(raw_text)):
+            if raw_text[i] == "{":
+                depth += 1
+            elif raw_text[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    brace_end = i + 1
+                    break
+        if brace_end > brace_start:
+            try:
+                decision = json.loads(raw_text[brace_start:brace_end])
+                _validate_decision(decision)
+                return decision
+            except (json.JSONDecodeError, ValueError):
+                pass
 
     log.error("Failed to parse Grok response: %s", raw_text[:500])
     raise RuntimeError(f"Could not parse JSON decision from Grok response")
@@ -200,6 +211,8 @@ def _validate_decision(decision: dict):
         raise ValueError(f"Invalid direction: {decision['direction']}")
 
     confidence = decision["confidence"]
+    if not isinstance(confidence, (int, float)) or math.isnan(confidence) or math.isinf(confidence):
+        raise ValueError(f"Confidence must be a finite number, got: {confidence}")
     if not (0 <= confidence <= 1):
         raise ValueError(f"Confidence out of range: {confidence}")
 
@@ -217,8 +230,12 @@ def _validate_decision(decision: dict):
         dur = decision["duration_minutes"]
         size = decision["position_size_pct"]
 
-        if entry <= 0:
-            raise ValueError(f"entry_price must be > 0, got {entry}")
+        if not isinstance(entry, (int, float)) or math.isnan(entry) or math.isinf(entry) or entry <= 0:
+            raise ValueError(f"entry_price must be a positive finite number, got {entry}")
+        if not isinstance(tp, (int, float)) or math.isnan(tp) or math.isinf(tp) or tp <= 0:
+            raise ValueError(f"take_profit must be a positive finite number, got {tp}")
+        if not isinstance(sl, (int, float)) or math.isnan(sl) or math.isinf(sl) or sl <= 0:
+            raise ValueError(f"stop_loss must be a positive finite number, got {sl}")
         if not (0 < size <= 1):
             raise ValueError(f"position_size_pct must be in (0, 1], got {size}")
         if dur <= 0:
@@ -227,10 +244,10 @@ def _validate_decision(decision: dict):
         direction = decision["direction"]
         if direction == "LONG" and not (tp > entry > sl):
             raise ValueError(
-                f"LONG price ordering invalid: TP({tp}) > entry({entry}) > SL({sl})")
+                f"LONG price ordering invalid: need TP({tp}) > entry({entry}) > SL({sl})")
         if direction == "SHORT" and not (sl > entry > tp):
             raise ValueError(
-                f"SHORT price ordering invalid: SL({sl}) > entry({entry}) > TP({tp})")
+                f"SHORT price ordering invalid: need SL({sl}) > entry({entry}) > TP({tp})")
 
     # Set defaults for NO_TRADE
     if decision["direction"] == "NO_TRADE":

@@ -373,11 +373,12 @@ class DydxExecutor:
         # dYdX v4 has no true market orders — all are limit orders.
         # For IOC "market" orders, set a limit price with slippage buffer
         # to sweep the book: BUY high (accept asks up to N% above), SELL low.
+        # BTC-USD tick size on dYdX v4 is $1 — round to whole dollars.
         slippage_pct = self.cfg.get("market_order_slippage_pct", 0.05)  # 5%
         if side == OrderSide.BUY:
-            limit_price = round(market_price * (1 + slippage_pct), 1)
+            limit_price = float(int(market_price * (1 + slippage_pct)) + 1)
         else:
-            limit_price = round(market_price * (1 - slippage_pct), 1)
+            limit_price = float(int(market_price * (1 - slippage_pct)))
 
         return {
             "direction": direction,
@@ -633,11 +634,22 @@ class DydxExecutor:
                 close_market_price = await self.dydx.get_current_price()
             except Exception:
                 close_market_price = params.get("market_price", 0)
+            if close_market_price <= 0:
+                log.critical("Cannot compute close price — market price unavailable. "
+                             "Manual intervention required.")
+                self._append_jsonl("trades.jsonl", {
+                    "timestamp": _ts(),
+                    "action": "EMERGENCY_CLOSE_FAILED",
+                    "error": "market price unavailable for limit price computation",
+                    "mode": "live",
+                    "status": "CRITICAL",
+                })
+                return
             slippage_pct = self.cfg.get("market_order_slippage_pct", 0.05)
             if close_side == OrderSide.BUY:
-                close_limit_price = round(close_market_price * (1 + slippage_pct), 1)
+                close_limit_price = float(int(close_market_price * (1 + slippage_pct)) + 1)
             else:
-                close_limit_price = round(close_market_price * (1 - slippage_pct), 1)
+                close_limit_price = float(int(close_market_price * (1 - slippage_pct)))
 
             block_height = await self.dydx.get_latest_block_height()
             good_til_block = block_height + self.cfg.get("short_term_block_offset", 10)

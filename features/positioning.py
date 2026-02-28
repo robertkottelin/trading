@@ -34,12 +34,12 @@ def build_positioning_features(grid: pd.DataFrame) -> pd.DataFrame:
     result["cot_asset_mgr_net"] = cot_aligned["cot_asset_mgr_net"]
     result["cot_oi"] = cot_aligned["cot_open_interest"]
 
-    # COT weekly changes
+    # COT weekly changes (data is weekly, ffilled to 5m grid: 7 * 288 = 2016 bars)
     result["cot_lev_money_change"] = (
-        result["cot_lev_money_net"].diff(1).astype(np.float32)
+        result["cot_lev_money_net"].diff(7 * 288).astype(np.float32)
     )
     result["cot_asset_mgr_change"] = (
-        result["cot_asset_mgr_net"].diff(1).astype(np.float32)
+        result["cot_asset_mgr_net"].diff(7 * 288).astype(np.float32)
     )
 
     # Net positioning as % of OI

@@ -40,9 +40,9 @@ def build_onchain_features(grid: pd.DataFrame) -> pd.DataFrame:
         result["oc_hash_rate"].pct_change(14 * 288).astype(np.float32)
     )
 
-    # Difficulty change
+    # Difficulty change (daily data ffilled to 5m grid: 288 bars per day)
     result["oc_difficulty_change"] = (
-        oc["oc_difficulty"].pct_change(1).astype(np.float32)
+        oc["oc_difficulty"].pct_change(288).astype(np.float32)
     )
 
     # Miner revenue + z-score
@@ -56,9 +56,9 @@ def build_onchain_features(grid: pd.DataFrame) -> pd.DataFrame:
     # Transaction fees
     result["oc_tx_fees"] = oc["oc_transaction_fees_usd"]
 
-    # UTXO count change
+    # UTXO count change (daily data ffilled to 5m grid: 288 bars per day)
     result["oc_utxo_change"] = (
-        oc["oc_utxo_count"].pct_change(1).astype(np.float32)
+        oc["oc_utxo_count"].pct_change(288).astype(np.float32)
     )
 
     # --- BTC network mining (daily, 1.1K rows) ---
@@ -76,7 +76,7 @@ def build_onchain_features(grid: pd.DataFrame) -> pd.DataFrame:
                 )
             if "net_difficulty" in m.columns:
                 result["net_difficulty_change"] = (
-                    m["net_difficulty"].pct_change(1).astype(np.float32)
+                    m["net_difficulty"].pct_change(288).astype(np.float32)
                 )
             if "net_adjustment_pct" in m.columns:
                 result["net_difficulty_adj_pct"] = m["net_adjustment_pct"]

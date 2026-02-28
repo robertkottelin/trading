@@ -194,7 +194,20 @@ These results were inflated by multiple issues that have since been fixed (Optun
 
 ---
 
-## 4. RESOLVED ISSUES FROM ROUND 1 (Archive)
+## 4. ROUND 4 CODE REVIEW (2026-02-28) — ALL FIXED
+
+### 4.1 Emergency Close Uses Stale Position Size
+**File:** `execution/dydx_executor.py` — `_emergency_close()` | **Severity:** MEDIUM
+
+**Problem:** When SL placement failed and emergency close was triggered, the close order used `params["size_btc"]` — the size calculated before the entry fill. If the entry was a partial fill (e.g., calculated 0.020 BTC but only 0.015 filled), the emergency close would attempt to close the wrong amount. While `reduce_only=True` prevents overshooting into a reverse position, attempting to close more than exists could cause order rejection, leaving the position unprotected.
+
+**Fix:** Before submitting the close order, the method now fetches the actual on-chain position size via `get_portfolio_state()`. If the position is found, uses the real size. Falls back to `params["size_btc"]` only if the portfolio fetch fails (with a warning log).
+
+**Status:** FIXED (2026-02-28)
+
+---
+
+## 5. RESOLVED ISSUES FROM ROUND 1 (Archive)
 
 | # | Issue | Severity | Fixed Date | Files |
 |---|-------|----------|------------|-------|
@@ -231,10 +244,11 @@ These results were inflated by multiple issues that have since been fixed (Optun
 | 3.5 | Config read race condition | MEDIUM | **FIXED** | `reasoning_agent.py` |
 | 3.6 | Unbounded ffill propagates stale data | MEDIUM | **FIXED** | `alignment.py` |
 | 3.7 | ISO timestamp timezone handling | LOW-MEDIUM | **FIXED** | `base.py` |
+| 4.1 | Emergency close uses stale position size | MEDIUM | **FIXED** | `dydx_executor.py` |
 
 ---
 
-## 6. PRIORITY — BEFORE LIVE TRADING
+## 7. PRIORITY — BEFORE LIVE TRADING
 
 ### Must Do
 1. **Retrain all models** with corrected fees, slippage, purge, and Optuna fix — compare new metrics to originals (item 1.1)

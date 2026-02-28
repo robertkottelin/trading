@@ -581,12 +581,32 @@ class DydxExecutor:
     async def _emergency_close(self, params: dict, close_side):
         """Attempt to close a position via market order when SL placement fails.
 
+        Fetches the actual on-chain position size (not the pre-calculated
+        params size) to ensure the close covers the real exposure.
         Polls for fill confirmation after submitting. Logs CRITICAL if
         the close cannot be verified.
         """
         from dydxv4.clients.constants import OrderTimeInForce
 
         try:
+            # Use actual on-chain position size, not the pre-calculated size
+            # which could differ due to partial fills or rounding
+            close_size = params["size_btc"]
+            try:
+                portfolio = await self.dydx.get_portfolio_state()
+                market = self.cfg.get("market", "BTC-USD")
+                for pos in portfolio.get("positions", []):
+                    if pos.get("market") == market:
+                        actual_size = abs(float(pos.get("size", 0)))
+                        if actual_size > 0:
+                            close_size = round(actual_size, 3)
+                            log.info("Emergency close using on-chain size %.3f BTC "
+                                     "(params had %.3f)", close_size, params["size_btc"])
+                        break
+            except Exception as e:
+                log.warning("Could not fetch on-chain position size, "
+                            "falling back to params size: %s", e)
+
             block_height = await self.dydx.get_latest_block_height()
             good_til_block = block_height + self.cfg.get("short_term_block_offset", 10)
             close_client_id = random.randint(0, MAX_CLIENT_ID)
@@ -595,13 +615,13 @@ class DydxExecutor:
                 market=self.cfg.get("market", "BTC-USD"),
                 side=close_side,
                 price=0,
-                size=params["size_btc"],
+                size=close_size,
                 client_id=close_client_id,
                 good_til_block=good_til_block,
                 time_in_force=OrderTimeInForce.IOC,
                 reduce_only=True,
             )
-            log.info("Emergency close order submitted for %.3f BTC", params["size_btc"])
+            log.info("Emergency close order submitted for %.3f BTC", close_size)
 
             # Verify the close order filled
             fill = await self._wait_for_fill(close_client_id)
@@ -610,7 +630,7 @@ class DydxExecutor:
                 self._append_jsonl("trades.jsonl", {
                     "timestamp": _ts(),
                     "action": "EMERGENCY_CLOSE",
-                    "size_btc": params["size_btc"],
+                    "size_btc": close_size,
                     "fill_price": fill.get("price"),
                     "mode": "live",
                     "status": "FILLED",
@@ -623,7 +643,7 @@ class DydxExecutor:
                 self._append_jsonl("trades.jsonl", {
                     "timestamp": _ts(),
                     "action": "EMERGENCY_CLOSE",
-                    "size_btc": params["size_btc"],
+                    "size_btc": close_size,
                     "mode": "live",
                     "status": "UNVERIFIED",
                 })

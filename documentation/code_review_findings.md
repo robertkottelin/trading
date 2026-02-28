@@ -26,6 +26,8 @@
 
 **Recommendation:** Add a position monitoring loop or a startup check that verifies positions still have active TP/SL orders.
 
+**Status:** FIXED (2026-02-28) — Added `verify_position_protection()` to `DydxExecutor`: checks every open position has TP+SL orders, emergency-closes positions missing SL. Called from Stage 0 in `reasoning_agent.py` (live mode only, after orphan cleanup).
+
 ---
 
 ## 2. BACKTESTING & ML TRAINING
@@ -62,6 +64,8 @@ The expanding percentile adapts to the probability distribution within each test
 
 **Recommendation:** Either close existing positions when DD breaker fires, or at minimum mark open positions to market during the cooldown period.
 
+**Status:** FIXED (2026-02-28) — When DD breaker triggers, all still-active positions (trades where `idx + horizon > trigger_idx`) are force-closed by zeroing their `net_ret`. Cumulative equity and peak are recomputed from scratch after the adjustment.
+
 ---
 
 ### 2.3 Recent-Weighted Quality Scoring Creates Regime Bias
@@ -74,6 +78,8 @@ weight = 2.0 if s <= 2 else 1.0  # Recent splits weighted 2x
 The most recent 2 of 10 walk-forward splits get double weight in the quality scoring. If the recent market regime is favorable (strong trend, low volatility), scores are inflated and models that fit the recent regime are promoted over more robust ones.
 
 **Recommendation:** Consider equal weighting across all splits, or explicitly test robustness across different market regimes.
+
+**Status:** FIXED (2026-02-28) — Changed to equal weighting (`weight = 1.0`) for all walk-forward splits. Phase header updated to "equal-weighted".
 
 ---
 
@@ -99,6 +105,8 @@ These results were inflated by multiple issues that have since been fixed (Optun
 
 **Recommendation:** Verify Alternative.me publication timing. If daily, use `lag_days=1`.
 
+**Status:** FIXED (2026-02-28) — Changed `lag_days=0` to `lag_days=1` for all three daily sources in `sentiment.py` (Fear & Greed, Google Trends, CoinGecko market data). Daily values now become available at D+1 00:00 UTC, preventing look-ahead bias.
+
 ---
 
 ### 3.2 618+ Features Create Overfitting Risk
@@ -119,6 +127,8 @@ These results were inflated by multiple issues that have since been fixed (Optun
 - Some magic numbers in rate limiting and retry backoff
 
 **Recommendation:** For live operation these are non-critical (market_context.py only fetches last 24h). For historical re-download efficiency, add incremental logic by reading the latest timestamp from existing CSV before requesting new data.
+
+**Status:** PARTIALLY FIXED (2026-02-28) — Fixed pagination boundary issues: `_paginate_by_ms` now uses `<=` for end boundary to avoid missing data at exact end timestamp; `_paginate_backward_iso` stop condition changed to `<=` to avoid re-fetching boundary rows. Incremental download logic not added (low priority).
 
 ---
 
@@ -157,6 +167,8 @@ These results were inflated by multiple issues that have since been fixed (Optun
 
 **Recommendation:** Add a heartbeat file (e.g., write timestamp to `state_data/heartbeat.txt` each cycle) and monitor externally.
 
+**Status:** FIXED (2026-02-28) — Added `_write_heartbeat()` to `reasoning_agent.py`: writes `state_data/heartbeat.json` (timestamp, stage, status) at the start, after each stage, and at completion. Uses atomic write (tmp + rename) for safe external reads.
+
 ---
 
 ### 5.2 Subprocess Timeout May Leave Orphan Processes
@@ -166,6 +178,8 @@ These results were inflated by multiple issues that have since been fixed (Optun
 
 **Recommendation:** Use `subprocess.Popen` with process group management, or ensure each subprocess handles SIGTERM gracefully.
 
+**Status:** N/A (2026-02-28) — `run_pipeline.py` does not exist in the codebase. No subprocess usage found. The pipeline uses direct function calls and `asyncio.run()`. This issue is moot.
+
 ---
 
 ## 6. SUMMARY TABLE
@@ -173,18 +187,18 @@ These results were inflated by multiple issues that have since been fixed (Optun
 | # | Issue | Severity | Status | File(s) |
 |---|-------|----------|--------|---------|
 | 1.1 | No orphan order cleanup on startup | MEDIUM | **FIXED** | `dydx_executor.py`, `dydx_client.py` |
-| 1.2 | No position close monitoring | MEDIUM | OPEN | `dydx_executor.py` |
+| 1.2 | No position close monitoring | MEDIUM | **FIXED** | `dydx_executor.py` |
 | 2.1 | Backtest/live threshold mismatch | HIGH | **FIXED** | `train_model_v23.py` |
-| 2.2 | DD breaker doesn't unwind positions | MEDIUM | OPEN | `train_model_v23.py` |
-| 2.3 | Recent-weighted quality scoring bias | LOW | OPEN | `train_model_v23.py` |
+| 2.2 | DD breaker doesn't unwind positions | MEDIUM | **FIXED** | `train_model_v23.py` |
+| 2.3 | Recent-weighted quality scoring bias | LOW | **FIXED** | `train_model_v23.py` |
 | 2.4 | Reported performance unrealistic (retrain needed) | HIGH | OPEN | `train_model_v23.py` |
-| 3.1 | Sentiment data lag may be insufficient | LOW | OPEN | `sentiment.py` |
+| 3.1 | Sentiment data lag may be insufficient | LOW | **FIXED** | `sentiment.py` |
 | 3.2 | 618+ features overfitting risk | LOW | OPEN | design |
-| 3.3 | Downloader pagination minor issues | LOW | OPEN | `base.py`, downloaders |
+| 3.3 | Downloader pagination minor issues | LOW | **PARTIAL** | `base.py`, downloaders |
 | 4.1 | Signal generator warmup gap | MEDIUM | **FIXED** | `signal_generator.py` |
 | 4.2 | Grok JSON fragile fallback parsing | LOW | **FIXED** | `grok_client.py` |
-| 5.1 | No pipeline health check | LOW | OPEN | `run_pipeline.py` |
-| 5.2 | Subprocess orphan processes | LOW | OPEN | `run_pipeline.py` |
+| 5.1 | No pipeline health check | LOW | **FIXED** | `reasoning_agent.py` |
+| 5.2 | Subprocess orphan processes | LOW | **N/A** | no subprocess usage |
 
 ---
 
@@ -196,13 +210,13 @@ These results were inflated by multiple issues that have since been fixed (Optun
 3. ~~**Add orphan order cleanup** (item 1.1)~~ — **FIXED** (2026-02-26): startup cleanup in live mode
 
 ### Should Do
-4. Validate sentiment data publication timing (item 3.1)
+4. ~~Validate sentiment data publication timing (item 3.1)~~ — **FIXED** (2026-02-28): `lag_days=1` for all daily sources
 5. ~~Add feature warmup check in signal generator (item 4.1)~~ — **FIXED** (2026-02-26)
-6. Add position monitoring for TP/SL fill verification (item 1.2)
+6. ~~Add position monitoring for TP/SL fill verification (item 1.2)~~ — **FIXED** (2026-02-28): `verify_position_protection()` in Stage 0
 7. ~~Add decision field validation after Grok JSON parsing (item 4.2)~~ — **FIXED** (2026-02-26)
 
 ### Nice to Have
-8. Pipeline heartbeat monitoring (item 5.1)
-9. Incremental download logic for historical downloaders (item 3.3)
+8. ~~Pipeline heartbeat monitoring (item 5.1)~~ — **FIXED** (2026-02-28): `state_data/heartbeat.json`
+9. ~~Pagination boundary fixes (item 3.3)~~ — **FIXED** (2026-02-28): off-by-one fixes in `base.py`
 10. Feature importance analysis and dimensionality reduction (item 3.2)
 11. Test across bear market data when available (item 3.2)

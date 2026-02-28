@@ -15,7 +15,7 @@ def build_sentiment_features(grid: pd.DataFrame) -> pd.DataFrame:
     # --- Fear & Greed Index (daily) ---
     fng = load_csv("sentiment_fear_greed.csv")
     fng_aligned = align_daily(fng, gms, "date",
-                              ["fng_value"], "sent_", lag_days=0)
+                              ["fng_value"], "sent_", lag_days=1)
 
     result["sent_fng_value"] = fng_aligned["sent_fng_value"]
 
@@ -44,7 +44,7 @@ def build_sentiment_features(grid: pd.DataFrame) -> pd.DataFrame:
     # --- Google Trends (daily/weekly) ---
     trends = load_csv("sentiment_google_trends.csv")
     trends_aligned = align_daily(trends, gms, "date",
-                                 ["bitcoin"], "sent_", lag_days=0)
+                                 ["bitcoin"], "sent_", lag_days=1)
 
     result["sent_gtrends_bitcoin"] = trends_aligned["sent_bitcoin"]
     result["sent_gtrends_momentum_7d"] = (
@@ -58,7 +58,7 @@ def build_sentiment_features(grid: pd.DataFrame) -> pd.DataFrame:
                     if c in mkt.columns]
         if mkt_cols:
             m = align_daily(mkt, gms, "date", mkt_cols,
-                            "sent_", lag_days=0)
+                            "sent_", lag_days=1)
             if "sent_btc_dominance" in m.columns:
                 result["sent_btc_dominance"] = m["sent_btc_dominance"]
                 result["sent_btc_dominance_change_7d"] = (

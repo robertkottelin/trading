@@ -137,7 +137,7 @@ class BaseDownloader(abc.ABC):
         all_data = []
         current = start_ms
         req_count = 0
-        while current < end_ms:
+        while current <= end_ms:
             params = {**params_base, start_key: current, end_key: end_ms, "limit": limit}
             try:
                 resp = self._http_get(url, params)
@@ -210,7 +210,7 @@ class BaseDownloader(abc.ABC):
                 filtered = []
                 for item in batch:
                     ts = item.get(timestamp_field, "")
-                    if ts and ts < stop_iso:
+                    if ts and ts <= stop_iso:
                         continue  # skip items before stop point (already have them)
                     filtered.append(item)
                 batch = filtered

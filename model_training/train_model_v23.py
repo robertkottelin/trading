@@ -395,7 +395,6 @@ def portfolio_backtest(model_trades_list, max_dd_pct=None, cooldown=20,
                 skip_count += 1
                 if skip_count >= cooldown:
                     breaker = False
-                    # Don't reset cum/peak — continue tracking actual equity
                 continue
             t_copy = dict(t)
             t_copy["net_ret"] = t["net_ret"] * position_scale * t["model_weight"]
@@ -406,6 +405,19 @@ def portfolio_backtest(model_trades_list, max_dd_pct=None, cooldown=20,
             if dd < -max_dd_pct:
                 breaker = True
                 skip_count = 0
+                # Force-close still-active positions: zero out returns for
+                # trades whose holding period extends past the trigger point
+                trigger_idx = t["idx"]
+                for prev_t in filtered:
+                    h = prev_t.get("horizon", 1)
+                    if prev_t["idx"] + h > trigger_idx and prev_t is not t_copy:
+                        prev_t["net_ret"] = 0.0
+                # Recompute cumulative return from scratch
+                cum = 1.0
+                peak = 1.0
+                for ft in filtered:
+                    cum *= (1 + ft["net_ret"])
+                    peak = max(peak, cum)
         merged = filtered
     else:
         for t in merged:
@@ -853,7 +865,7 @@ def main():
         # PHASE 3: QUALITY SCORING
         # =====================================================================
         log(f"\n{'#'*80}", f)
-        log(f"  PHASE 3: QUALITY SCORING (recent-weighted)", f)
+        log(f"  PHASE 3: QUALITY SCORING (equal-weighted)", f)
         log(f"{'#'*80}\n", f)
 
         def compute_quality(name):
@@ -864,7 +876,7 @@ def main():
                     r = all_results[name][s]
                     if r["trades"]:
                         net = np.prod([1 + t["net_ret"] for t in r["trades"]]) - 1
-                        weight = 2.0 if s <= 2 else 1.0
+                        weight = 1.0
                         nets.append((net, weight))
                         # Daily-return-based Sharpe
                         t_idxs = np.array([t["idx"] for t in r["trades"]])
@@ -890,7 +902,7 @@ def main():
         mean_q = np.mean(list(quality.values()))
         weights = {k: v / mean_q for k, v in quality.items()}
 
-        log(f"  Model quality weights (recent-weighted, mean=1.0):", f)
+        log(f"  Model quality weights (equal-weighted, mean=1.0):", f)
         for name in sorted(selected):
             opt_tag = ""
             for key in optimized_params:

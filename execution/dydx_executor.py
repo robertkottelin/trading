@@ -195,6 +195,84 @@ class DydxExecutor:
 
         return cancelled
 
+    async def verify_position_protection(self) -> int:
+        """Check that every open position has TP and SL orders.
+
+        Returns the number of unprotected positions found and emergency-closed.
+        """
+        try:
+            portfolio = await self.dydx.get_portfolio_state()
+            open_orders = await self.dydx.get_open_orders()
+        except Exception as e:
+            log.error("Failed to fetch state for position protection check: %s", e)
+            return 0
+
+        positions = portfolio.get("positions", [])
+        if not positions:
+            log.info("Position protection: no open positions")
+            return 0
+
+        # Group orders by market
+        orders_by_market: dict[str, list[dict]] = {}
+        for o in open_orders:
+            orders_by_market.setdefault(o["market"], []).append(o)
+
+        unprotected = 0
+        for pos in positions:
+            market = pos["market"]
+            market_orders = orders_by_market.get(market, [])
+            has_tp = any(
+                o["type"] in ("TAKE_PROFIT", "TAKE_PROFIT_LIMIT")
+                for o in market_orders
+            )
+            has_sl = any(
+                o["type"] in ("STOP_LIMIT", "STOP_MARKET", "STOP")
+                for o in market_orders
+            )
+
+            if has_tp and has_sl:
+                continue
+
+            missing = []
+            if not has_tp:
+                missing.append("TP")
+            if not has_sl:
+                missing.append("SL")
+
+            log.critical(
+                "UNPROTECTED POSITION: %s %s %s — missing %s",
+                pos["side"], pos["size"], market, "+".join(missing),
+            )
+            self._append_jsonl("trades.jsonl", {
+                "timestamp": _ts(),
+                "action": "UNPROTECTED_POSITION_DETECTED",
+                "market": market,
+                "side": pos["side"],
+                "size": pos["size"],
+                "missing_orders": missing,
+                "mode": "live",
+                "status": "CRITICAL",
+            })
+
+            # Emergency close if SL is missing (no downside protection)
+            if not has_sl:
+                from dydxv4.clients.constants import OrderSide
+                close_side = (
+                    OrderSide.SELL if pos["side"] == "LONG" else OrderSide.BUY
+                )
+                size = float(pos["size"].replace("-", ""))
+                await self._emergency_close(
+                    {"size_btc": size, "direction": pos["side"]}, close_side
+                )
+                unprotected += 1
+
+        if unprotected == 0:
+            log.info(
+                "Position protection: all %d position(s) have TP+SL orders",
+                len(positions),
+            )
+        return unprotected
+
     # ------------------------------------------------------------------
     # Order building
     # ------------------------------------------------------------------

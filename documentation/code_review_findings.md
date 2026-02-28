@@ -1,115 +1,28 @@
 # Code Review Findings — BTC Trading System
 
-> Two comprehensive code reviews performed on the full repository.
+> **Round 1:** Two comprehensive code reviews performed on 2026-02-26 and 2026-02-28.
+> **Round 2:** Third code review performed on 2026-02-28.
 > Covers: execution safety, backtesting realism, data pipeline integrity, LLM agent logic.
-> Issues marked **FIXED** have been resolved; remaining issues are open.
+> Fixed issues from Round 1 have been archived to the summary table below.
 
 ---
 
-## 1. EXECUTION LAYER
+## 1. OPEN ISSUES FROM ROUND 1
 
-### 1.1 No Orphan Order Cleanup on Startup
-**File:** `execution/dydx_executor.py` | **Severity:** MEDIUM
-
-**Problem:** If the pipeline crashes or is interrupted after placing an entry but before placing TP/SL (or after placing TP but before SL), orphan orders can remain on the dYdX order book. No cleanup mechanism runs on pipeline startup.
-
-**Recommendation:** Add a startup check in `dydx_executor.py` or `run_pipeline.py` that queries open orders and cancels any that don't correspond to active positions.
-
-**Status:** FIXED (2026-02-26) — Added `get_open_orders()` and `cancel_order()` to `DydxClient`, `cleanup_orphan_orders()` to `DydxExecutor`, and Stage 0 startup cleanup in `reasoning_agent.py` (live mode only, non-fatal on failure).
-
----
-
-### 1.2 No Position Close Monitoring
-**File:** `execution/dydx_executor.py` | **Severity:** MEDIUM
-
-**Problem:** After placing TP/SL conditional orders, the executor has no mechanism to check if they actually filled. If a TP or SL order gets cancelled by the exchange (e.g., insufficient margin, self-trade prevention), the position continues unmonitored until the next pipeline cycle.
-
-**Recommendation:** Add a position monitoring loop or a startup check that verifies positions still have active TP/SL orders.
-
-**Status:** FIXED (2026-02-28) — Added `verify_position_protection()` to `DydxExecutor`: checks every open position has TP+SL orders, emergency-closes positions missing SL. Called from Stage 0 in `reasoning_agent.py` (live mode only, after orphan cleanup).
-
----
-
-## 2. BACKTESTING & ML TRAINING
-
-### 2.1 Backtest vs Live Signal Threshold Mismatch
-**File:** `model_training/train_model_v23.py:335-351` vs `llm_agent/signal_generator.py:246` | **Severity:** HIGH
-
-**Problem:** Backtest uses expanding percentile filtering:
-```python
-expanding_threshold = np.quantile(past_probs, 1.0 - top_pct)
-if t["prob"] >= expanding_threshold:
-    trades.append(t)
-```
-Live uses a fixed probability threshold:
-```python
-firing = final_prob >= prob_threshold  # e.g., 0.40
-```
-The expanding percentile adapts to the probability distribution within each test fold — in high-signal periods the threshold rises (fewer, higher-quality trades), in low-signal periods it falls (more trades). This inflates backtest Sharpe and reduces drawdown compared to the fixed threshold used in production. Models with `top_pct=0.10` are especially affected.
-
-**Recommendation:** Either:
-1. Use the same fixed `prob_threshold` in backtesting (set `top_pct=None`)
-2. Or implement expanding percentile in the live `signal_generator.py`
-
-**Impact:** Backtest results with expanding percentile do not accurately predict live performance. Must retrain and re-evaluate models after aligning thresholds.
-
-**Status:** FIXED (2026-02-26) — Set `top_pct=None` for all 44 models in `ALL_MODELS`. Backtest now uses fixed `prob_threshold` only, matching live behavior. Models need retraining to get honest metrics.
-
----
-
-### 2.2 Portfolio DD Breaker Doesn't Unwind Positions
-**File:** `model_training/train_model_v23.py:381-403` | **Severity:** MEDIUM
-
-**Problem:** When the portfolio drawdown breaker triggers in backtesting, it skips new trades but doesn't close existing ones. Equity tracking assumes positions just stop opening — no mark-to-market on open trades during the cooldown. The cooldown resets after N skipped trades and resumes without verifying that conditions improved.
-
-**Recommendation:** Either close existing positions when DD breaker fires, or at minimum mark open positions to market during the cooldown period.
-
-**Status:** FIXED (2026-02-28) — When DD breaker triggers, all still-active positions (trades where `idx + horizon > trigger_idx`) are force-closed by zeroing their `net_ret`. Cumulative equity and peak are recomputed from scratch after the adjustment.
-
----
-
-### 2.3 Recent-Weighted Quality Scoring Creates Regime Bias
-**File:** `model_training/train_model_v23.py` (~line 858) | **Severity:** LOW
-
-**Problem:**
-```python
-weight = 2.0 if s <= 2 else 1.0  # Recent splits weighted 2x
-```
-The most recent 2 of 10 walk-forward splits get double weight in the quality scoring. If the recent market regime is favorable (strong trend, low volatility), scores are inflated and models that fit the recent regime are promoted over more robust ones.
-
-**Recommendation:** Consider equal weighting across all splits, or explicitly test robustness across different market regimes.
-
-**Status:** FIXED (2026-02-28) — Changed to equal weighting (`weight = 1.0`) for all walk-forward splits. Phase header updated to "equal-weighted".
-
----
-
-### 2.4 Reported Backtest Performance Is Unrealistic
+### 1.1 Reported Backtest Performance Is Unrealistic
 **Severity:** HIGH (requires retrain to validate)
 
 **Problem:**
 - v23: Sharpe 3.1+, 10/10 positive WF splits, worst DD -0.3%, annualized +461%
 - v22: Sharpe 40.1, +524,139% annualized
 
-These results were inflated by multiple issues that have since been fixed (Optuna test-set leakage, low fees, no slippage, insufficient purge) plus the still-unfixed expanding percentile threshold advantage (item 2.1).
+These results were inflated by multiple issues that have since been fixed (Optuna test-set leakage, low fees, no slippage, insufficient purge) plus the now-fixed expanding percentile threshold advantage.
 
 **Action required:** Retrain models with all fixes applied and compare new Sharpe/DD/win-rate against originals. Realistic expectations for a well-built crypto momentum system: Sharpe 0.5-1.5, max DD 5-15%.
 
 ---
 
-## 3. DATA PIPELINE
-
-### 3.1 Sentiment Data Lag May Be Insufficient
-**Files:** `features/sentiment.py`, `downloaders/sentiment_hist.py` | **Severity:** LOW
-
-**Problem:** Fear & Greed index uses `lag_days=0`. Verify that the Alternative.me API publishes the index in real-time rather than as a daily aggregate. If it's published once daily (e.g., at midnight UTC), using `lag_days=0` on intraday data could leak ~24h of future information.
-
-**Recommendation:** Verify Alternative.me publication timing. If daily, use `lag_days=1`.
-
-**Status:** FIXED (2026-02-28) — Changed `lag_days=0` to `lag_days=1` for all three daily sources in `sentiment.py` (Fear & Greed, Google Trends, CoinGecko market data). Daily values now become available at D+1 00:00 UTC, preventing look-ahead bias.
-
----
-
-### 3.2 618+ Features Create Overfitting Risk
+### 1.2 618+ Features Create Overfitting Risk
 **Severity:** LOW (design consideration)
 
 **Problem:** ~618 features for a binary classification task with ~240K rows creates high dimensionality risk. The per-target top-100 feature selection helps but doesn't eliminate the risk of spurious correlations, especially with only ~27 months of data (Nov 2023 – present) covering predominantly bull market conditions.
@@ -118,105 +31,128 @@ These results were inflated by multiple issues that have since been fixed (Optun
 
 ---
 
-### 3.3 Downloader Pagination Minor Issues
+### 1.3 Downloader Pagination Minor Issues
 **File:** `downloaders/base.py` | **Severity:** LOW
 
 **Problem:**
-- `base.py` pagination loop may have off-by-one at boundaries
 - dYdX and OKX downloaders lack incremental download logic (always re-download from start)
 - Some magic numbers in rate limiting and retry backoff
 
-**Recommendation:** For live operation these are non-critical (market_context.py only fetches last 24h). For historical re-download efficiency, add incremental logic by reading the latest timestamp from existing CSV before requesting new data.
-
-**Status:** PARTIALLY FIXED (2026-02-28) — Fixed pagination boundary issues: `_paginate_by_ms` now uses `<=` for end boundary to avoid missing data at exact end timestamp; `_paginate_backward_iso` stop condition changed to `<=` to avoid re-fetching boundary rows. Incremental download logic not added (low priority).
+**Status:** PARTIALLY FIXED (2026-02-28) — Fixed pagination boundary issues: `_paginate_by_ms` now uses `<=` for end boundary; `_paginate_backward_iso` stop condition changed to `<=`. Incremental download logic not added (low priority for live operation — `market_context.py` only fetches last 24h).
 
 ---
 
-## 4. LLM AGENT
+## 2. ROUND 2 CODE REVIEW (2026-02-28) — ALL FIXED
 
-### 4.1 Signal Generator Feature Warmup Gap
-**File:** `llm_agent/signal_generator.py:219-220` | **Severity:** MEDIUM
+### 2.1 Fill Confirmation Fallback Matches Wrong Fill
+**File:** `execution/dydx_executor.py` — `_wait_for_fill()` | **Severity:** CRITICAL
 
-**Problem:** Live inference uses only the last ~24h of data from `market_context_data/`. Rolling windows of 288 candles need a full 24h warmup. On fresh startup, or if market_context.py fetches less than 24h of data, feature quality degrades for the early candles. The system accepts models even with up to 50% missing features.
+**Problem:** `_wait_for_fill()` fell back to returning the most recent fill from the Indexer if no `clientId` match was found. This could misattribute a fill from a different order (e.g., a TP/SL fill, or a fill from a previous crash), leading to incorrect `fill_price`, wrong `fee_usd`, and proceeding with TP/SL placement for a potentially unfilled entry.
 
-**Recommendation:** Either:
-1. Ensure `market_context.py` always fetches at least 288 candles (24h of 5-min data)
-2. Or add a warmup check: if fewer than 288 candles available, log a warning and skip ML inference for that cycle
+**Fix:** Removed the fallback. The method now only returns fills matched by `clientId`. If no match is found after all polling attempts, returns `None`. The caller already handles this as `UNVERIFIED` status and performs an on-chain position check before deciding whether to place TP/SL.
 
-**Status:** FIXED (2026-02-26) — `_build_features()` now returns empty DataFrame (skips ML inference) if fewer than 350 candles available. Added NaN check on latest feature row: >30% NaN raises ValueError, caught per-model.
+**Status:** FIXED (2026-02-28)
 
 ---
 
-### 4.2 Grok JSON Parsing Relies on Fragile Fallbacks
-**File:** `llm_agent/grok_client.py` | **Severity:** LOW
+### 2.2 Daily Loss Circuit Breaker Fails Open on Corrupted State
+**File:** `execution/risk_manager.py` — `_check_daily_loss()` | **Severity:** MEDIUM
 
-**Problem:** Grok's JSON output is parsed with 3 fallback strategies (direct parse → regex extract → manual parse). While robust in practice, malformed JSON from the LLM could silently produce partial decisions with missing fields.
+**Problem:** When `portfolio.jsonl` existed but was corrupted or unreadable (`OSError` or `json.JSONDecodeError`), the daily loss circuit breaker returned `(True, "")` — allowing the trade to proceed. A financial safety check should fail-closed: if you cannot verify daily losses are within limits, reject the trade.
 
-**Recommendation:** Add explicit validation of all required fields (`direction`, `confidence`, `entry_price`, `take_profit`, `stop_loss`, `duration_minutes`, `position_size_pct`) after JSON parsing, rejecting decisions with missing critical fields before they reach the risk manager.
+**Fix:** Changed the exception handler to return `(False, "daily loss check failed: could not read portfolio history")`. Note: the "file does not exist" case (line 171) still correctly returns `(True, "")` since there's no history to check on first run.
 
-**Status:** FIXED (2026-02-26) — Added value-range validation in `_validate_decision()`: `entry_price > 0`, `position_size_pct` in `(0, 1]`, `duration_minutes > 0`, and LONG/SHORT price ordering checks (TP > entry > SL for LONG, SL > entry > TP for SHORT).
-
----
-
-## 5. OPERATIONAL
-
-### 5.1 Pipeline Has No Health Check / Heartbeat
-**File:** `run_pipeline.py` | **Severity:** LOW
-
-**Problem:** In `--loop` mode, the pipeline runs indefinitely but has no health check mechanism. If the pipeline silently stalls (e.g., hung HTTP request, deadlock), there's no alert.
-
-**Recommendation:** Add a heartbeat file (e.g., write timestamp to `state_data/heartbeat.txt` each cycle) and monitor externally.
-
-**Status:** FIXED (2026-02-28) — Added `_write_heartbeat()` to `reasoning_agent.py`: writes `state_data/heartbeat.json` (timestamp, stage, status) at the start, after each stage, and at completion. Uses atomic write (tmp + rename) for safe external reads.
+**Status:** FIXED (2026-02-28)
 
 ---
 
-### 5.2 Subprocess Timeout May Leave Orphan Processes
-**File:** `run_pipeline.py` | **Severity:** LOW
+### 2.3 Emergency Close Not Verified
+**File:** `execution/dydx_executor.py` — `_emergency_close()` | **Severity:** MEDIUM
 
-**Problem:** `run_pipeline.py` launches subprocesses with 10-minute (data) and 5-minute (reasoning) timeouts via `subprocess.run(timeout=...)`. If a timeout fires, the subprocess is killed, but child processes spawned by it may not be cleaned up.
+**Problem:** `_emergency_close()` placed a market close order and logged it as "SUBMITTED" without verifying the fill. If the order was rejected by the exchange (e.g., insufficient margin, self-trade prevention), the position would remain open but the system would believe it was closed.
 
-**Recommendation:** Use `subprocess.Popen` with process group management, or ensure each subprocess handles SIGTERM gracefully.
+**Fix:** After submitting the close order, the method now calls `_wait_for_fill()` with the close order's `clientId`. If confirmed, logs at INFO with fill price and records status `FILLED`. If unconfirmed, logs at CRITICAL level ("position may still be open — manual intervention required") and records status `UNVERIFIED`.
 
-**Status:** N/A (2026-02-28) — `run_pipeline.py` does not exist in the codebase. No subprocess usage found. The pipeline uses direct function calls and `asyncio.run()`. This issue is moot.
+**Status:** FIXED (2026-02-28)
 
 ---
 
-## 6. SUMMARY TABLE
+### 2.4 No Market Data Staleness Check
+**File:** `llm_agent/signal_generator.py` — `generate_signals()` | **Severity:** MEDIUM
+
+**Problem:** The signal generator logged the latest candle timestamp but never checked how old it was. If the data pipeline failed to update (e.g., exchange API outage, downloader crash), ML signals would be generated on stale data without any warning.
+
+**Fix:** Added staleness check after computing `latest_ts`:
+- **>30 minutes stale:** Logs WARNING ("signals may be unreliable") but continues inference.
+- **>2 hours stale:** Logs ERROR and returns empty signals (same format as warmup gap check), preventing trading on data that's too old.
+
+**Status:** FIXED (2026-02-28)
+
+---
+
+### 2.5 Orphan Cleanup Misses Duplicate TP/SL Orders
+**File:** `execution/dydx_executor.py` — `cleanup_orphan_orders()` | **Severity:** LOW-MEDIUM
+
+**Problem:** `cleanup_orphan_orders()` only checked whether orders existed in markets without active positions. It would not detect duplicate TP or SL orders for the same position — e.g., if the system crashed after placing a TP order but before recording it, then placed another TP on restart.
+
+**Fix:** Added a second pass after the orphan-by-market cleanup. For each active position's market, groups orders by type (TP vs SL). If more than 1 TP or more than 1 SL order exists, cancels the extras. Re-fetches open orders before the second pass if any were cancelled in the first pass to avoid operating on stale state.
+
+**Status:** FIXED (2026-02-28)
+
+---
+
+### 2.6 Target Threshold Parsing Crash on Malformed Names
+**File:** `llm_agent/signal_generator.py` — `_run_single_model()` | **Severity:** LOW
+
+**Problem:** The threshold parsing code `thresh_str[0] + "." + thresh_str[1:]` would crash with `IndexError` if the target name had an unexpected format (empty or single-character threshold component).
+
+**Fix:** Wrapped in `try/except (IndexError, ValueError)`. On parse failure, defaults to `threshold_decimal = 0.0` and logs a warning. This value is only used for the human-readable signal description — the actual model threshold comparison uses `prob_threshold` from config, so trading correctness is unaffected.
+
+**Status:** FIXED (2026-02-28)
+
+---
+
+## 3. RESOLVED ISSUES FROM ROUND 1 (Archive)
+
+| # | Issue | Severity | Fixed Date | Files |
+|---|-------|----------|------------|-------|
+| R1.1 | No orphan order cleanup on startup | MEDIUM | 2026-02-26 | `dydx_executor.py`, `dydx_client.py` |
+| R1.2 | No position close monitoring | MEDIUM | 2026-02-28 | `dydx_executor.py` |
+| R1.3 | Backtest/live threshold mismatch | HIGH | 2026-02-26 | `train_model_v23.py` |
+| R1.4 | DD breaker doesn't unwind positions | MEDIUM | 2026-02-28 | `train_model_v23.py` |
+| R1.5 | Recent-weighted quality scoring bias | LOW | 2026-02-28 | `train_model_v23.py` |
+| R1.6 | Sentiment data lag (look-ahead bias) | LOW | 2026-02-28 | `sentiment.py` |
+| R1.7 | Signal generator warmup gap | MEDIUM | 2026-02-26 | `signal_generator.py` |
+| R1.8 | Grok JSON fragile fallback parsing | LOW | 2026-02-26 | `grok_client.py` |
+| R1.9 | No pipeline health check / heartbeat | LOW | 2026-02-28 | `reasoning_agent.py` |
+| R1.10 | Subprocess timeout orphan processes | LOW | N/A | moot (no subprocess usage) |
+
+---
+
+## 4. SUMMARY TABLE (All Issues)
 
 | # | Issue | Severity | Status | File(s) |
 |---|-------|----------|--------|---------|
-| 1.1 | No orphan order cleanup on startup | MEDIUM | **FIXED** | `dydx_executor.py`, `dydx_client.py` |
-| 1.2 | No position close monitoring | MEDIUM | **FIXED** | `dydx_executor.py` |
-| 2.1 | Backtest/live threshold mismatch | HIGH | **FIXED** | `train_model_v23.py` |
-| 2.2 | DD breaker doesn't unwind positions | MEDIUM | **FIXED** | `train_model_v23.py` |
-| 2.3 | Recent-weighted quality scoring bias | LOW | **FIXED** | `train_model_v23.py` |
-| 2.4 | Reported performance unrealistic (retrain needed) | HIGH | OPEN | `train_model_v23.py` |
-| 3.1 | Sentiment data lag may be insufficient | LOW | **FIXED** | `sentiment.py` |
-| 3.2 | 618+ features overfitting risk | LOW | OPEN | design |
-| 3.3 | Downloader pagination minor issues | LOW | **PARTIAL** | `base.py`, downloaders |
-| 4.1 | Signal generator warmup gap | MEDIUM | **FIXED** | `signal_generator.py` |
-| 4.2 | Grok JSON fragile fallback parsing | LOW | **FIXED** | `grok_client.py` |
-| 5.1 | No pipeline health check | LOW | **FIXED** | `reasoning_agent.py` |
-| 5.2 | Subprocess orphan processes | LOW | **N/A** | no subprocess usage |
+| 1.1 | Reported performance unrealistic (retrain needed) | HIGH | **OPEN** | `train_model_v23.py` |
+| 1.2 | 618+ features overfitting risk | LOW | **OPEN** | design |
+| 1.3 | Downloader pagination minor issues | LOW | **PARTIAL** | `base.py`, downloaders |
+| 2.1 | Fill confirmation fallback matches wrong fill | CRITICAL | **FIXED** | `dydx_executor.py` |
+| 2.2 | Daily loss circuit breaker fails open | MEDIUM | **FIXED** | `risk_manager.py` |
+| 2.3 | Emergency close not verified | MEDIUM | **FIXED** | `dydx_executor.py` |
+| 2.4 | No market data staleness check | MEDIUM | **FIXED** | `signal_generator.py` |
+| 2.5 | Orphan cleanup misses duplicate TP/SL | LOW-MEDIUM | **FIXED** | `dydx_executor.py` |
+| 2.6 | Target threshold parsing crash | LOW | **FIXED** | `signal_generator.py` |
 
 ---
 
-## 7. PRIORITY — BEFORE LIVE TRADING
+## 5. PRIORITY — BEFORE LIVE TRADING
 
 ### Must Do
-1. **Retrain all models** with corrected fees, slippage, purge, and Optuna fix — compare new metrics to originals
-2. ~~**Align backtest/live thresholds** (item 2.1)~~ — **FIXED** (2026-02-26): set `top_pct=None` for all models
-3. ~~**Add orphan order cleanup** (item 1.1)~~ — **FIXED** (2026-02-26): startup cleanup in live mode
+1. **Retrain all models** with corrected fees, slippage, purge, and Optuna fix — compare new metrics to originals (item 1.1)
 
 ### Should Do
-4. ~~Validate sentiment data publication timing (item 3.1)~~ — **FIXED** (2026-02-28): `lag_days=1` for all daily sources
-5. ~~Add feature warmup check in signal generator (item 4.1)~~ — **FIXED** (2026-02-26)
-6. ~~Add position monitoring for TP/SL fill verification (item 1.2)~~ — **FIXED** (2026-02-28): `verify_position_protection()` in Stage 0
-7. ~~Add decision field validation after Grok JSON parsing (item 4.2)~~ — **FIXED** (2026-02-26)
+2. Feature importance analysis and dimensionality reduction (item 1.2)
+3. Test on historical bear market data when available (item 1.2)
 
 ### Nice to Have
-8. ~~Pipeline heartbeat monitoring (item 5.1)~~ — **FIXED** (2026-02-28): `state_data/heartbeat.json`
-9. ~~Pagination boundary fixes (item 3.3)~~ — **FIXED** (2026-02-28): off-by-one fixes in `base.py`
-10. Feature importance analysis and dimensionality reduction (item 3.2)
-11. Test across bear market data when available (item 3.2)
+4. Add incremental download logic to dYdX/OKX downloaders (item 1.3)

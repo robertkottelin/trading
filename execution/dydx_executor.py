@@ -141,7 +141,8 @@ class DydxExecutor:
         return entry_record
 
     async def cleanup_orphan_orders(self) -> int:
-        """Cancel open orders that don't correspond to active positions.
+        """Cancel open orders that don't correspond to active positions,
+        and cancel duplicate TP/SL orders for the same position.
 
         Returns the number of orders cancelled.
         """
@@ -159,39 +160,109 @@ class DydxExecutor:
         # Markets with active positions — their TP/SL orders are legitimate
         active_markets = {p["market"] for p in portfolio.get("positions", [])}
 
+        # --- Pass 1: Cancel orders in markets with no active position ---
         orphans = [o for o in open_orders if o["market"] not in active_markets]
-        if not orphans:
-            log.info("Orphan cleanup: all %d open orders have matching positions",
-                     len(open_orders))
-            return 0
-
-        log.warning("Orphan cleanup: found %d orphan order(s) to cancel", len(orphans))
         cancelled = 0
-        for order in orphans:
+
+        if orphans:
+            log.warning("Orphan cleanup: found %d orphan order(s) to cancel", len(orphans))
+            for order in orphans:
+                try:
+                    client_id = int(order["client_id"]) if str(order["client_id"]).isdigit() else 0
+                    await self.dydx.cancel_order(
+                        client_id=client_id,
+                        order_flags=order.get("order_flags", ""),
+                        good_til_block=order.get("good_til_block"),
+                        good_til_block_time=order.get("good_til_block_time"),
+                    )
+                    cancelled += 1
+                    self._append_jsonl("trades.jsonl", {
+                        "timestamp": _ts(),
+                        "action": "ORPHAN_ORDER_CANCELLED",
+                        "order_id": order["order_id"],
+                        "market": order["market"],
+                        "side": order["side"],
+                        "size": order["size"],
+                        "type": order["type"],
+                        "mode": "live",
+                        "status": "CANCELLED",
+                    })
+                    log.info("Cancelled orphan order: %s %s %s %s",
+                             order["type"], order["side"], order["size"], order["market"])
+                except Exception as e:
+                    log.error("Failed to cancel orphan order %s: %s", order["order_id"], e)
+
+        # --- Pass 2: Cancel duplicate TP/SL orders per active position ---
+        # Re-fetch if we cancelled any (state changed)
+        if cancelled > 0:
             try:
-                client_id = int(order["client_id"]) if str(order["client_id"]).isdigit() else 0
-                await self.dydx.cancel_order(
-                    client_id=client_id,
-                    order_flags=order.get("order_flags", ""),
-                    good_til_block=order.get("good_til_block"),
-                    good_til_block_time=order.get("good_til_block_time"),
-                )
-                cancelled += 1
-                self._append_jsonl("trades.jsonl", {
-                    "timestamp": _ts(),
-                    "action": "ORPHAN_ORDER_CANCELLED",
-                    "order_id": order["order_id"],
-                    "market": order["market"],
-                    "side": order["side"],
-                    "size": order["size"],
-                    "type": order["type"],
-                    "mode": "live",
-                    "status": "CANCELLED",
-                })
-                log.info("Cancelled orphan order: %s %s %s %s",
-                         order["type"], order["side"], order["size"], order["market"])
+                open_orders = await self.dydx.get_open_orders()
             except Exception as e:
-                log.error("Failed to cancel orphan order %s: %s", order["order_id"], e)
+                log.error("Failed to re-fetch orders for duplicate check: %s", e)
+                return cancelled
+
+        tp_types = {"TAKE_PROFIT", "TAKE_PROFIT_LIMIT"}
+        sl_types = {"STOP_LIMIT", "STOP_MARKET", "STOP"}
+
+        orders_by_market: dict[str, list[dict]] = {}
+        for o in open_orders:
+            if o["market"] in active_markets:
+                orders_by_market.setdefault(o["market"], []).append(o)
+
+        for market, market_orders in orders_by_market.items():
+            tp_orders = [o for o in market_orders if o["type"] in tp_types]
+            sl_orders = [o for o in market_orders if o["type"] in sl_types]
+
+            # Cancel excess TP orders (keep first, cancel rest)
+            for excess in tp_orders[1:]:
+                try:
+                    client_id = int(excess["client_id"]) if str(excess["client_id"]).isdigit() else 0
+                    await self.dydx.cancel_order(
+                        client_id=client_id,
+                        order_flags=excess.get("order_flags", ""),
+                        good_til_block=excess.get("good_til_block"),
+                        good_til_block_time=excess.get("good_til_block_time"),
+                    )
+                    cancelled += 1
+                    self._append_jsonl("trades.jsonl", {
+                        "timestamp": _ts(),
+                        "action": "DUPLICATE_TP_CANCELLED",
+                        "order_id": excess["order_id"],
+                        "market": market,
+                        "mode": "live",
+                        "status": "CANCELLED",
+                    })
+                    log.warning("Cancelled duplicate TP order %s in %s",
+                                excess["order_id"], market)
+                except Exception as e:
+                    log.error("Failed to cancel duplicate TP %s: %s", excess["order_id"], e)
+
+            # Cancel excess SL orders (keep first, cancel rest)
+            for excess in sl_orders[1:]:
+                try:
+                    client_id = int(excess["client_id"]) if str(excess["client_id"]).isdigit() else 0
+                    await self.dydx.cancel_order(
+                        client_id=client_id,
+                        order_flags=excess.get("order_flags", ""),
+                        good_til_block=excess.get("good_til_block"),
+                        good_til_block_time=excess.get("good_til_block_time"),
+                    )
+                    cancelled += 1
+                    self._append_jsonl("trades.jsonl", {
+                        "timestamp": _ts(),
+                        "action": "DUPLICATE_SL_CANCELLED",
+                        "order_id": excess["order_id"],
+                        "market": market,
+                        "mode": "live",
+                        "status": "CANCELLED",
+                    })
+                    log.warning("Cancelled duplicate SL order %s in %s",
+                                excess["order_id"], market)
+                except Exception as e:
+                    log.error("Failed to cancel duplicate SL %s: %s", excess["order_id"], e)
+
+        if cancelled == 0:
+            log.info("Orphan cleanup: all %d open orders are valid", len(open_orders))
 
         return cancelled
 
@@ -395,7 +466,11 @@ class DydxExecutor:
         return record_base
 
     async def _wait_for_fill(self, client_id: int) -> dict | None:
-        """Poll Indexer for fill confirmation with retries."""
+        """Poll Indexer for fill confirmation with retries.
+
+        Only returns fills matched by clientId to avoid misattributing
+        fills from other orders (e.g., after a crash/restart).
+        """
         max_attempts = self.cfg.get("fill_poll_max_attempts", 10)
         poll_interval_s = self.cfg.get("fill_poll_interval_s", 2)
 
@@ -407,17 +482,13 @@ class DydxExecutor:
                     address, self.dydx.subaccount_number, limit=10
                 )
                 fills = fills_resp.get("fills", [])
-                # Try to match by clientId if available, else take most recent
                 for fill in fills:
                     if fill.get("clientId") == str(client_id):
                         log.info("Fill confirmed (matched clientId) on attempt %d", attempt + 1)
                         return fill
-                # Fallback: return most recent fill if it's fresh (within last 60s)
-                if fills:
-                    log.info("Fill found (most recent, no clientId match) on attempt %d", attempt + 1)
-                    return fills[0]
             except Exception as e:
                 log.warning("Fill poll attempt %d failed: %s", attempt + 1, e)
+        log.warning("No fill matched clientId=%d after %d attempts", client_id, max_attempts)
         return None
 
     async def _place_tp_sl_orders(
@@ -508,31 +579,54 @@ class DydxExecutor:
     # ------------------------------------------------------------------
 
     async def _emergency_close(self, params: dict, close_side):
-        """Attempt to close a position via market order when SL placement fails."""
+        """Attempt to close a position via market order when SL placement fails.
+
+        Polls for fill confirmation after submitting. Logs CRITICAL if
+        the close cannot be verified.
+        """
         from dydxv4.clients.constants import OrderTimeInForce
 
         try:
             block_height = await self.dydx.get_latest_block_height()
             good_til_block = block_height + self.cfg.get("short_term_block_offset", 10)
+            close_client_id = random.randint(0, MAX_CLIENT_ID)
             await self.dydx.client.place_short_term_order(
                 self.dydx.subaccount,
                 market=self.cfg.get("market", "BTC-USD"),
                 side=close_side,
                 price=0,
                 size=params["size_btc"],
-                client_id=random.randint(0, MAX_CLIENT_ID),
+                client_id=close_client_id,
                 good_til_block=good_til_block,
                 time_in_force=OrderTimeInForce.IOC,
                 reduce_only=True,
             )
             log.info("Emergency close order submitted for %.3f BTC", params["size_btc"])
-            self._append_jsonl("trades.jsonl", {
-                "timestamp": _ts(),
-                "action": "EMERGENCY_CLOSE",
-                "size_btc": params["size_btc"],
-                "mode": "live",
-                "status": "SUBMITTED",
-            })
+
+            # Verify the close order filled
+            fill = await self._wait_for_fill(close_client_id)
+            if fill:
+                log.info("Emergency close CONFIRMED — fill price: %s", fill.get("price", "?"))
+                self._append_jsonl("trades.jsonl", {
+                    "timestamp": _ts(),
+                    "action": "EMERGENCY_CLOSE",
+                    "size_btc": params["size_btc"],
+                    "fill_price": fill.get("price"),
+                    "mode": "live",
+                    "status": "FILLED",
+                })
+            else:
+                log.critical(
+                    "Emergency close UNVERIFIED — position may still be open! "
+                    "Manual intervention required."
+                )
+                self._append_jsonl("trades.jsonl", {
+                    "timestamp": _ts(),
+                    "action": "EMERGENCY_CLOSE",
+                    "size_btc": params["size_btc"],
+                    "mode": "live",
+                    "status": "UNVERIFIED",
+                })
         except Exception as e:
             log.error("CRITICAL: Emergency close FAILED — manual intervention required: %s", e)
             self._append_jsonl("trades.jsonl", {

@@ -11,6 +11,7 @@ Usage:
 
 import argparse
 import asyncio
+import fcntl
 import json
 import logging
 import os
@@ -28,6 +29,7 @@ log = logging.getLogger(__name__)
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "config", "settings.yaml")
 DECISION_PATH = os.path.join(os.path.dirname(__file__), "..", "llm_agent", "decision.json")
+EXECUTION_LOCK_PATH = os.path.join(os.path.dirname(__file__), "..", "state_data", "execution.lock")
 MAX_CLIENT_ID = 2**31 - 1
 
 
@@ -57,7 +59,34 @@ class DydxExecutor:
     # ------------------------------------------------------------------
 
     async def execute_decision(self, decision: dict | None = None) -> dict:
-        """Execute a trading decision.  Returns the trade record."""
+        """Execute a trading decision.  Returns the trade record.
+
+        Acquires an exclusive file lock to prevent concurrent pipeline runs
+        from placing duplicate orders.
+        """
+        os.makedirs(os.path.dirname(EXECUTION_LOCK_PATH), exist_ok=True)
+        lock_fd = open(EXECUTION_LOCK_PATH, "w")
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            lock_fd.close()
+            log.warning("Another execution is already in progress — skipping")
+            return {
+                "timestamp": _ts(),
+                "action": "REJECTED",
+                "rejection_reason": "concurrent execution blocked by lock",
+                "mode": "live",
+                "status": "REJECTED",
+            }
+
+        try:
+            return await self._execute_decision_locked(decision)
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            lock_fd.close()
+
+    async def _execute_decision_locked(self, decision: dict | None = None) -> dict:
+        """Inner execution logic, called while holding the execution lock."""
 
         # 1. Load decision
         if decision is None:
@@ -531,24 +560,28 @@ class DydxExecutor:
         duration_min = decision.get("duration_minutes", 60)
         gtt_seconds = min(max((duration_min + 60) * 60, 3600), 86400)
 
-        # Take profit
+        # Take profit — round to $1 tick size (dYdX BTC-USD requirement)
         tp_price = params["take_profit"]
         if tp_price > 0:
+            if close_side == OrderSide.SELL:
+                tp_tick_price = float(int(tp_price))       # floor for sell
+            else:
+                tp_tick_price = float(int(tp_price) + 1)   # ceil for buy
             try:
                 await self.dydx.client.place_order(
                     self.dydx.subaccount,
                     market=self.cfg.get("market", "BTC-USD"),
                     type=OrderType.TAKE_PROFIT,
                     side=close_side,
-                    price=tp_price,
-                    trigger_price=tp_price,
+                    price=tp_tick_price,
+                    trigger_price=tp_tick_price,
                     size=params["size_btc"],
                     client_id=random.randint(0, MAX_CLIENT_ID),
                     time_in_force=OrderTimeInForce.GTT,
                     good_til_time_in_seconds=gtt_seconds,
                     reduce_only=True,
                 )
-                log.info("TP order placed at $%,.2f", tp_price)
+                log.info("TP order placed at $%,.0f (raw $%,.2f)", tp_tick_price, tp_price)
                 tp_ok = True
             except Exception as e:
                 log.error("TP order failed: %s", e)
@@ -561,23 +594,33 @@ class DydxExecutor:
                 })
 
         # Stop loss (critical — position is unprotected without it)
+        # Round trigger to $1 tick size, and add slippage buffer to limit
+        # price so the order fills even if the market gaps past the trigger.
         sl_price = params["stop_loss"]
         if sl_price > 0:
+            slippage_pct = self.cfg.get("market_order_slippage_pct", 0.05)
+            if close_side == OrderSide.SELL:
+                sl_trigger = float(int(sl_price) + 1)   # ceil → trigger sooner
+                sl_limit = float(int(sl_price * (1 - slippage_pct)))  # sell lower to fill on gap
+            else:
+                sl_trigger = float(int(sl_price))        # floor → trigger sooner
+                sl_limit = float(int(sl_price * (1 + slippage_pct)) + 1)  # buy higher to fill on gap
             try:
                 await self.dydx.client.place_order(
                     self.dydx.subaccount,
                     market=self.cfg.get("market", "BTC-USD"),
                     type=OrderType.STOP_LIMIT,
                     side=close_side,
-                    price=sl_price,
-                    trigger_price=sl_price,
+                    price=sl_limit,
+                    trigger_price=sl_trigger,
                     size=params["size_btc"],
                     client_id=random.randint(0, MAX_CLIENT_ID),
                     time_in_force=OrderTimeInForce.GTT,
                     good_til_time_in_seconds=gtt_seconds,
                     reduce_only=True,
                 )
-                log.info("SL order placed at $%,.2f", sl_price)
+                log.info("SL order placed: trigger $%,.0f, limit $%,.0f (raw $%,.2f)",
+                         sl_trigger, sl_limit, sl_price)
                 sl_ok = True
             except Exception as e:
                 log.error("SL order failed — position is UNPROTECTED: %s", e)

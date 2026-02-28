@@ -104,7 +104,12 @@ class DydxExecutor:
             log.warning("Entry fill unverified — checking for actual position on-chain...")
             try:
                 check_portfolio = await self.dydx.get_portfolio_state()
-                has_position = len(check_portfolio.get("positions", [])) > 0
+                target_market = self.cfg.get("market", "BTC-USD")
+                has_position = any(
+                    abs(float(p.get("size", 0))) > 0
+                    for p in check_portfolio.get("positions", [])
+                    if p.get("market") == target_market
+                )
             except Exception as e:
                 log.error("Position check failed: %s", e)
                 has_position = False
@@ -365,11 +370,21 @@ class DydxExecutor:
         from dydxv4.clients.constants import OrderSide
         side = OrderSide.BUY if direction == "LONG" else OrderSide.SELL
 
+        # dYdX v4 has no true market orders — all are limit orders.
+        # For IOC "market" orders, set a limit price with slippage buffer
+        # to sweep the book: BUY high (accept asks up to N% above), SELL low.
+        slippage_pct = self.cfg.get("market_order_slippage_pct", 0.05)  # 5%
+        if side == OrderSide.BUY:
+            limit_price = round(market_price * (1 + slippage_pct), 1)
+        else:
+            limit_price = round(market_price * (1 - slippage_pct), 1)
+
         return {
             "direction": direction,
             "side": side,
             "size_btc": size_btc,
             "market_price": market_price,
+            "limit_price": limit_price,
             "entry_price": decision.get("entry_price", market_price),
             "take_profit": decision.get("take_profit", 0),
             "stop_loss": decision.get("stop_loss", 0),
@@ -415,7 +430,7 @@ class DydxExecutor:
                 subaccount,
                 market=self.cfg.get("market", "BTC-USD"),
                 side=params["side"],
-                price=0,  # market order — price 0 with IOC
+                price=params["limit_price"],
                 size=params["size_btc"],
                 client_id=client_id,
                 good_til_block=good_til_block,
@@ -429,13 +444,18 @@ class DydxExecutor:
             if "sequence" in str(e).lower():
                 log.warning("Wallet sequence mismatch, retrying: %s", e)
                 try:
+                    # Re-fetch block height — the original may have expired
+                    block_height = await self.dydx.get_latest_block_height()
+                    good_til_block = block_height + self.cfg.get("short_term_block_offset", 10)
+                    # Generate new client_id and capture it so _wait_for_fill uses it
+                    client_id = random.randint(0, MAX_CLIENT_ID)
                     tx = await self.dydx.client.place_short_term_order(
-                        subaccount,
+                        self.dydx.subaccount,
                         market=self.cfg.get("market", "BTC-USD"),
                         side=params["side"],
-                        price=0,
+                        price=params.get("limit_price", 0),
                         size=params["size_btc"],
-                        client_id=random.randint(0, MAX_CLIENT_ID),
+                        client_id=client_id,
                         good_til_block=good_til_block,
                         time_in_force=OrderTimeInForce.IOC,
                         reduce_only=False,
@@ -607,6 +627,18 @@ class DydxExecutor:
                 log.warning("Could not fetch on-chain position size, "
                             "falling back to params size: %s", e)
 
+            # Compute aggressive limit price to sweep the book for IOC close
+            from dydxv4.clients.constants import OrderSide
+            try:
+                close_market_price = await self.dydx.get_current_price()
+            except Exception:
+                close_market_price = params.get("market_price", 0)
+            slippage_pct = self.cfg.get("market_order_slippage_pct", 0.05)
+            if close_side == OrderSide.BUY:
+                close_limit_price = round(close_market_price * (1 + slippage_pct), 1)
+            else:
+                close_limit_price = round(close_market_price * (1 - slippage_pct), 1)
+
             block_height = await self.dydx.get_latest_block_height()
             good_til_block = block_height + self.cfg.get("short_term_block_offset", 10)
             close_client_id = random.randint(0, MAX_CLIENT_ID)
@@ -614,7 +646,7 @@ class DydxExecutor:
                 self.dydx.subaccount,
                 market=self.cfg.get("market", "BTC-USD"),
                 side=close_side,
-                price=0,
+                price=close_limit_price,
                 size=close_size,
                 client_id=close_client_id,
                 good_til_block=good_til_block,

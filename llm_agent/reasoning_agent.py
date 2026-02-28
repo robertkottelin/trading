@@ -102,7 +102,7 @@ def run(args):
                 client = DydxClient()
                 await client.connect()
                 try:
-                    executor = DydxExecutor(client, config=exec_cfg)
+                    executor = DydxExecutor(client, config=_full_cfg)
                     return await executor.cleanup_orphan_orders()
                 finally:
                     await client.disconnect()
@@ -119,7 +119,7 @@ def run(args):
                 client = DydxClient()
                 await client.connect()
                 try:
-                    executor = DydxExecutor(client, config=exec_cfg)
+                    executor = DydxExecutor(client, config=_full_cfg)
                     return await executor.verify_position_protection()
                 finally:
                     await client.disconnect()

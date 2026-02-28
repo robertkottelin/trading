@@ -207,7 +207,87 @@ These results were inflated by multiple issues that have since been fixed (Optun
 
 ---
 
-## 5. RESOLVED ISSUES FROM ROUND 1 (Archive)
+## 5. ROUND 5 CODE REVIEW (2026-02-28) — ALL FIXED
+
+### 5.1 price=0 on BUY Orders Never Fills on dYdX v4
+**File:** `execution/dydx_executor.py` — `_place_entry_order()`, `_emergency_close()` | **Severity:** CRITICAL
+
+**Problem:** dYdX v4 has no market orders — all orders are limit orders. `price=0` for a BUY means "buy at $0 or lower" which matches nothing. All LONG entries and emergency closes of SHORT positions silently failed to execute.
+
+**Fix:** Added `limit_price` to `_build_order_params()` with a configurable slippage buffer (default 5%). BUY uses `market_price * 1.05`, SELL uses `market_price * 0.95`. Emergency close fetches fresh market price before computing the limit.
+
+**Status:** FIXED (2026-02-28)
+
+### 5.2 xAI `instructions` Parameter Unsupported
+**File:** `llm_agent/grok_client.py` — `call_grok()` | **Severity:** CRITICAL
+
+**Problem:** The xAI Responses API does not support the `instructions` parameter. The system prompt (containing all trading rules, risk constraints, and output format) was either silently dropped or caused API errors on every call.
+
+**Fix:** Replaced `"instructions": SYSTEM_PROMPT` with a system message in the `input` array: `[{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": prompt}]`.
+
+**Status:** FIXED (2026-02-28)
+
+### 5.3 Stage 0 Passes Wrong Config Nesting to DydxExecutor
+**File:** `llm_agent/reasoning_agent.py` — Stage 0 | **Severity:** HIGH
+
+**Problem:** `exec_cfg = _full_cfg.get("execution", {})` was passed as `config=exec_cfg`. The `DydxExecutor` constructor does `config.get("execution", {})` on whatever it receives, so it double-extracted, producing an empty dict. Orphan cleanup and position protection ran with no configured market, limits, or state directory.
+
+**Fix:** Changed to `config=_full_cfg` (the full YAML config) so the executor can properly extract its execution sub-section.
+
+**Status:** FIXED (2026-02-28)
+
+### 5.4 Retry Uses Stale good_til_block + Loses client_id
+**File:** `execution/dydx_executor.py` — `_place_entry_order()` | **Severity:** HIGH
+
+**Problem:** On sequence mismatch retry: (a) the block height was stale and could already be expired, and (b) a new random `client_id` was generated but not captured, so `_wait_for_fill` polled for the old one.
+
+**Fix:** Re-fetch block height before retry. Capture the new `client_id` into the variable used downstream by `_wait_for_fill`.
+
+**Status:** FIXED (2026-02-28)
+
+### 5.5 GARCH/RV vs DVOL Double-Counts sqrt(288)
+**File:** `features/volatility_implied.py` | **Severity:** HIGH
+
+**Problem:** `garch_vol_fast` and `realized_vol_288` in ta_core.py already contain `* sqrt(288)` (daily scaling). The DVOL comparison then multiplied by `sqrt(105192)` = `sqrt(365.25 * 288)`, double-counting the `sqrt(288)` factor and inflating the vol by ~17x. This made `dvol_vs_garch` and `dvol_vs_realized` features near-constant and uninformative.
+
+**Fix:** Changed multiplier from `sqrt(105192)` to `sqrt(365.25)` since the inputs are already daily vol.
+
+**Status:** FIXED (2026-02-28)
+
+### 5.6 Backward Pagination Early Termination
+**File:** `downloaders/base.py` — `_paginate_backward_iso()` | **Severity:** HIGH
+
+**Problem:** The early-exit check `len(batch) < limit` used the filtered batch length. Near the stop boundary, filtering removed items, making the batch appear short and halting pagination prematurely.
+
+**Fix:** Track raw batch length separately. Use `raw_batch_len < limit` for the "more pages?" check. When items are filtered by `stop_iso`, break explicitly since we've reached the boundary.
+
+**Status:** FIXED (2026-02-28)
+
+### 5.7 Optuna Evaluates on Early-Stopping Validation Set
+**File:** `model_training/train_model_v23.py` | **Severity:** HIGH
+
+**Problem:** Optuna objective evaluated `model.predict_proba(X_va)` — the same set used for early stopping. This is circular: early stopping picks the best iteration for X_va, then Optuna rewards that biased metric, leading to overfitting of hyperparameters.
+
+**Fix:** Changed to evaluate on `X_te` (held-out test set), consistent with how borrowed params are evaluated. The comparison delta is now apples-to-apples.
+
+**Status:** FIXED (2026-02-28)
+
+### 5.8–5.16 Additional Fixes (Medium/Low Severity)
+- **5.8** No-config crash: Added fallback when no config meets selection criteria in v23
+- **5.9** Weighted score: Denominator now only includes BULLISH models
+- **5.10** Binance basis: Fixed column name from `open_time_ms` to `timestamp_ms`
+- **5.11** Deribit funding: Fixed column name from `funding_rate` to `interest_8h`, dYdX annualization from 3x to 24x per day
+- **5.12** Coinalyze predicted: Fixed column name from `funding_rate` to `predicted_rate`, sort column from `timestamp_ms` to `None`
+- **5.13** VWAP deviation: Aligned spot_close to grid before computing deviation
+- **5.14** Daily loss JSONL: Moved JSONDecodeError catch inside the loop so corrupt lines are skipped, not fatal
+- **5.15** Position check: Filter by target market, not just any position existing
+- **5.16** Breakeven trades: PnL=0% no longer counted as losses
+
+**Status:** ALL FIXED (2026-02-28)
+
+---
+
+## 6. RESOLVED ISSUES FROM ROUND 1 (Archive)
 
 | # | Issue | Severity | Fixed Date | Files |
 |---|-------|----------|------------|-------|
@@ -245,10 +325,26 @@ These results were inflated by multiple issues that have since been fixed (Optun
 | 3.6 | Unbounded ffill propagates stale data | MEDIUM | **FIXED** | `alignment.py` |
 | 3.7 | ISO timestamp timezone handling | LOW-MEDIUM | **FIXED** | `base.py` |
 | 4.1 | Emergency close uses stale position size | MEDIUM | **FIXED** | `dydx_executor.py` |
+| 5.1 | price=0 on BUY orders never fills (no market orders on dYdX v4) | CRITICAL | **FIXED** | `dydx_executor.py` |
+| 5.2 | xAI `instructions` param unsupported — system prompt never delivered | CRITICAL | **FIXED** | `grok_client.py` |
+| 5.3 | Stage 0 passes wrong config nesting → empty executor config | HIGH | **FIXED** | `reasoning_agent.py` |
+| 5.4 | Retry uses stale good_til_block + loses client_id | HIGH | **FIXED** | `dydx_executor.py` |
+| 5.5 | GARCH/RV vs DVOL double-counts sqrt(288) — 17x inflation | HIGH | **FIXED** | `volatility_implied.py` |
+| 5.6 | Backward pagination early termination near stop boundary | HIGH | **FIXED** | `base.py` |
+| 5.7 | Optuna evaluates on early-stopping validation set (biased) | HIGH | **FIXED** | `train_model_v23.py` |
+| 5.8 | No-config-passes crash (KeyError: None) | MEDIUM | **FIXED** | `train_model_v23.py` |
+| 5.9 | Weighted score denominator inflated by NEUTRAL models | MEDIUM | **FIXED** | `signal_generator.py` |
+| 5.10 | Binance basis features silently skipped (column name mismatch) | MEDIUM | **FIXED** | `cross_exchange.py` |
+| 5.11 | Context builder: Deribit/dYdX funding column name mismatches | MEDIUM | **FIXED** | `context_builder.py` |
+| 5.12 | Coinalyze predicted funding column name mismatch | MEDIUM | **FIXED** | `context_builder.py` |
+| 5.13 | dYdX VWAP deviation uses unaligned spot_close array | MEDIUM | **FIXED** | `dydx_trades.py` |
+| 5.14 | Daily loss check aborts on single corrupt JSONL line | MEDIUM | **FIXED** | `risk_manager.py` |
+| 5.15 | Unverified fill position check doesn't filter by market | MEDIUM | **FIXED** | `dydx_executor.py` |
+| 5.16 | Breakeven trades (PnL=0%) counted as losses | LOW | **FIXED** | `decision_manager.py` |
 
 ---
 
-## 7. PRIORITY — BEFORE LIVE TRADING
+## 8. PRIORITY — BEFORE LIVE TRADING
 
 ### Must Do
 1. **Retrain all models** with corrected fees, slippage, purge, and Optuna fix — compare new metrics to originals (item 1.1)
@@ -256,6 +352,9 @@ These results were inflated by multiple issues that have since been fixed (Optun
 ### Should Do
 2. Feature importance analysis and dimensionality reduction (item 1.2)
 3. Test on historical bear market data when available (item 1.2)
+4. Exclude raw OHLCV columns from feature set in v1_all/v2_all (item from Round 5 training review)
+5. Fix Sortino ratio denominator in v1_all/v2_all (uses only negative days instead of all days)
 
 ### Nice to Have
-4. Add incremental download logic to dYdX/OKX downloaders (item 1.3)
+6. Add incremental download logic to dYdX/OKX downloaders (item 1.3)
+7. Use consistent serialization format (pickle vs joblib) for models

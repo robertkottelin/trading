@@ -206,18 +206,25 @@ class BaseDownloader(abc.ABC):
                 break
 
             # Check stop condition
+            raw_batch_len = len(batch)
             if stop_iso:
                 filtered = []
+                reached_stop = False
                 for item in batch:
                     ts = item.get(timestamp_field, "")
                     if ts and ts <= stop_iso:
+                        reached_stop = True
                         continue  # skip items before stop point (already have them)
                     filtered.append(item)
                 batch = filtered
+                if reached_stop:
+                    # We've reached the boundary — no more pages needed
+                    all_data.extend(batch)
+                    break
 
             all_data.extend(batch)
 
-            if len(batch) < limit:
+            if raw_batch_len < limit:
                 break
 
             # Next page: use oldest item in this batch

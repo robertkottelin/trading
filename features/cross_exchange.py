@@ -128,8 +128,8 @@ def build_cross_exchange_features(grid: pd.DataFrame,
     # --- Binance futures basis (511 rows, recent only) ---
     try:
         basis = load_csv("binance_futures_basis.csv")
-        basis = basis.drop_duplicates(subset="open_time_ms", keep="last")
-        basis = basis.set_index(ts_col_to_ms(basis, "open_time_ms").values)
+        basis = basis.drop_duplicates(subset="timestamp_ms", keep="last")
+        basis = basis.set_index(ts_col_to_ms(basis, "timestamp_ms").values)
         if "basis_rate" in basis.columns:
             basis_rate = _reindex_col(basis, "basis_rate", grid_vals).astype(np.float64)
             result["bnc_basis_rate"] = pd.Series(basis_rate, dtype=np.float32)

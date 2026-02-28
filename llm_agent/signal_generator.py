@@ -184,16 +184,16 @@ def generate_signals() -> dict:
             log.warning("Model %s failed: %s", name, e)
             signals[name] = {"error": str(e), "signal": "ERROR"}
 
-    # Compute weighted consensus score
+    # Compute weighted consensus score (only over BULLISH models)
     weighted_sum = 0.0
     weight_total = 0.0
     for s in signals.values():
         if "error" in s:
             continue
         w = s.get("quality_weight", 1.0)
-        weight_total += w
         if s["signal"] == "BULLISH":
             weighted_sum += w * s["prob"]
+            weight_total += w
         # BEARISH models would subtract, but we only have long models
 
     weighted_score = weighted_sum / weight_total if weight_total > 0 else 0.0

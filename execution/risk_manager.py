@@ -179,7 +179,11 @@ class RiskManager:
                     line = line.strip()
                     if not line:
                         continue
-                    snap = json.loads(line)
+                    try:
+                        snap = json.loads(line)
+                    except json.JSONDecodeError:
+                        log.debug("Skipping corrupt JSONL line in portfolio snapshots")
+                        continue
                     ts = snap.get("timestamp", "")
                     if not ts:
                         continue
@@ -191,7 +195,7 @@ class RiskManager:
                         snap_equity = snap.get("equity", 0)
                         if snap_equity > 0 and today_start_equity is None:
                             today_start_equity = snap_equity
-        except (OSError, json.JSONDecodeError) as e:
+        except OSError as e:
             log.warning("Could not read portfolio snapshots for daily loss check: %s", e)
             return False, f"daily loss check failed: could not read portfolio history ({e})"
 

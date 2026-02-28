@@ -213,8 +213,9 @@ def get_recent_summary(n: int = 10) -> str:
             total_pnl += pnl
             if pnl > 0:
                 wins += 1
-            else:
+            elif pnl < 0:
                 losses += 1
+            # pnl == 0 is breakeven — not counted as win or loss
 
     if trades > 0:
         win_rate = wins / trades * 100

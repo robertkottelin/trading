@@ -86,8 +86,10 @@ def get_decision(prompt: str, enable_web_search: bool = True) -> dict:
 
     payload = {
         "model": MODEL,
-        "instructions": SYSTEM_PROMPT,
-        "input": prompt,
+        "input": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ],
         "tools": tools,
         "text": {"format": {"type": "json_object"}},
     }

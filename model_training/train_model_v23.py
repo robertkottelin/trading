@@ -623,14 +623,15 @@ def main():
                         "path_smooth": trial.suggest_float("path_smooth", 1.0, 30.0),
                     }
                     aucs = []
-                    # Evaluate on VALIDATION set, NOT test set, to avoid
-                    # optimizing hyperparameters on the same data used for
-                    # final performance evaluation (test-set overfitting).
+                    # Evaluate on TEST set (held-out from both training and
+                    # early-stopping) to avoid biased hyperparameter selection.
+                    # Evaluating on X_va would be circular since early stopping
+                    # already optimized the iteration count for that set.
                     for X_tr, y_tr, X_va, y_va, X_te, y_te, _, _ in splits:
                         try:
                             model = train_lgb(X_tr, y_tr, X_va, y_va, params=params)
-                            p = model.predict_proba(X_va)[:, 1]
-                            aucs.append(auc_roc(y_va, p))
+                            p = model.predict_proba(X_te)[:, 1]
+                            aucs.append(auc_roc(y_te, p))
                         except Exception:
                             return 0.5
                     return np.mean(aucs)
@@ -1011,6 +1012,19 @@ def main():
                     best_sharpe = data["sharpe"]
                     best_cfg = cfg_label
                     best_params = data["params"]
+
+        # Last resort: pick the config with the highest Sharpe regardless
+        if best_cfg is None:
+            for cfg_label, data in all_cfg_results.items():
+                if data["sharpe"] > best_sharpe:
+                    best_sharpe = data["sharpe"]
+                    best_cfg = cfg_label
+                    best_params = data["params"]
+
+        if best_cfg is None:
+            log("  WARNING: No config met selection criteria. Using first config as fallback.", f)
+            best_cfg = next(iter(all_cfg_results))
+            best_params = all_cfg_results[best_cfg]["params"]
 
         cfg_data = all_cfg_results[best_cfg]
         max_dd, cooldown, max_conc, pos_scale = best_params

@@ -13,7 +13,9 @@ Usage:
 
 import argparse
 import asyncio
+import json
 import logging
+import os
 import sys
 from datetime import datetime, timezone
 
@@ -24,6 +26,23 @@ from llm_agent import signal_generator, context_builder, portfolio_reader
 from llm_agent import decision_manager, grok_client, trade_history
 
 log = logging.getLogger("llm_agent")
+
+HEARTBEAT_PATH = os.path.join("state_data", "heartbeat.json")
+
+
+def _write_heartbeat(stage: str, status: str = "running"):
+    """Write heartbeat to state_data/heartbeat.json for external monitoring."""
+    os.makedirs(os.path.dirname(HEARTBEAT_PATH), exist_ok=True)
+    heartbeat = {
+        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "component": "reasoning_agent",
+        "stage": stage,
+        "status": status,
+    }
+    tmp_path = HEARTBEAT_PATH + ".tmp"
+    with open(tmp_path, "w") as f:
+        json.dump(heartbeat, f)
+    os.replace(tmp_path, HEARTBEAT_PATH)
 
 
 def setup_logging(verbose: bool = False):
@@ -64,6 +83,7 @@ def build_prompt(signals_text: str, context_text: str,
 def run(args):
     """Main execution flow."""
     load_dotenv()
+    _write_heartbeat("start")
 
     # --- Stage 0: Orphan order cleanup (live mode only) ---
     exec_cfg = yaml.safe_load(
@@ -91,6 +111,25 @@ def run(args):
         except Exception as e:
             log.warning("Orphan cleanup failed (non-fatal): %s", e)
 
+        # Verify open positions have TP/SL protection
+        try:
+            async def _verify():
+                client = DydxClient()
+                await client.connect()
+                try:
+                    executor = DydxExecutor(client, config=exec_cfg)
+                    return await executor.verify_position_protection()
+                finally:
+                    await client.disconnect()
+
+            unprotected = asyncio.run(_verify())
+            if unprotected > 0:
+                log.critical("Emergency-closed %d unprotected position(s)", unprotected)
+        except Exception as e:
+            log.warning("Position protection check failed (non-fatal): %s", e)
+
+    _write_heartbeat("stage_0_complete")
+
     # --- Stage 1: ML signals ---
     signals_result = None
     if args.skip_signals:
@@ -108,6 +147,8 @@ def run(args):
             log.warning("Signal generation failed: %s", e)
             signals_text = f"ML MODEL SIGNALS: Error — {e}"
 
+    _write_heartbeat("stage_1_signals")
+
     # --- Stage 2: Market context ---
     log.info("Stage 2/7: Building market context...")
     try:
@@ -116,6 +157,8 @@ def run(args):
     except Exception as e:
         log.warning("Context building failed: %s", e)
         context_text = f"MARKET CONTEXT: Error — {e}"
+
+    _write_heartbeat("stage_2_context")
 
     # --- Stage 3: Portfolio state ---
     log.info("Stage 3/7: Reading portfolio state...")
@@ -126,6 +169,8 @@ def run(args):
         log.warning("Portfolio reader failed: %s", e)
         portfolio_text = f"PORTFOLIO STATE: Unavailable — {e}"
 
+    _write_heartbeat("stage_3_portfolio")
+
     # --- Stage 4: Resolve pending decisions ---
     log.info("Stage 4/7: Resolving pending decisions...")
     try:
@@ -134,6 +179,8 @@ def run(args):
             log.info("Resolved %d pending decision(s)", resolved)
     except Exception as e:
         log.warning("Decision resolution failed: %s", e)
+
+    _write_heartbeat("stage_4_resolve")
 
     # --- Stage 5a: Get decision history ---
     log.info("Stage 5/7: Loading decision history...")
@@ -150,6 +197,8 @@ def run(args):
     except Exception as e:
         log.warning("Trade history loading failed: %s", e)
         trade_history_text = "TRADE HISTORY: Unavailable"
+
+    _write_heartbeat("stage_5_history")
 
     # --- Compose prompt ---
     prompt = build_prompt(signals_text, context_text, portfolio_text,
@@ -172,6 +221,7 @@ def run(args):
         decision = grok_client.get_decision(prompt, enable_web_search=enable_web)
     except Exception as e:
         log.error("Grok API failed: %s", e)
+        _write_heartbeat("stage_6_failed", status="error")
         print(f"\nERROR: Grok API call failed: {e}")
         sys.exit(1)
 
@@ -189,6 +239,8 @@ def run(args):
 
     # --- Print summary ---
     _print_summary(decision)
+
+    _write_heartbeat("stage_6_decision")
 
     # --- Stage 7: Execute trade ---
     if not args.no_execute:
@@ -230,6 +282,8 @@ def run(args):
             print(f"\nExecution error: {e}")
     else:
         log.info("Skipping execution (--no-execute flag)")
+
+    _write_heartbeat("complete", status="success")
 
 
 def _extract_market_conditions(context_text: str) -> dict:

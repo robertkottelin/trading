@@ -397,10 +397,10 @@ def compute_ta_features(df: pd.DataFrame, prefix: str = "") -> pd.DataFrame:
     d["garch_vs_rv_24"] = d["garch_vol_fast"] / (d["realized_vol_24"] + 1e-10)
     d["garch_vs_rv_96"] = d["garch_vol_slow"] / (d["realized_vol_96"] + 1e-10)
 
-    garch_vol_s = pd.Series(garch_vol, index=ret_series.index)
+    garch_vol_fast_s = pd.Series(d["garch_vol_fast"], index=ret_series.index)
     for w in [24, 96]:
         d[f"leverage_effect_{w}"] = ret_series.rolling(w, min_periods=12).corr(
-            garch_vol_s.shift(1)
+            garch_vol_fast_s.shift(1)
         )
 
     for w in [12, 24, 48]:

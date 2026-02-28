@@ -49,12 +49,13 @@ def build_funding_features(grid: pd.DataFrame) -> pd.DataFrame:
         result["funding_cross_max"] - result["funding_cross_min"]
     ).astype(np.float32)
 
-    # Momentum
+    # Momentum: 3 funding periods (Binance is 8h = 96 bars per period)
+    # 3 * 96 = 288 bars = 24 hours of funding rate change
     result["funding_binance_momentum_3"] = (
-        result["funding_binance"].diff(3).astype(np.float32)
+        result["funding_binance"].diff(3 * 96).astype(np.float32)
     )
     result["funding_cross_mean_momentum_3"] = (
-        result["funding_cross_mean"].diff(3).astype(np.float32)
+        result["funding_cross_mean"].diff(3 * 96).astype(np.float32)
     )
 
     # Z-scores

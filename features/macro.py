@@ -14,14 +14,17 @@ from features.alignment import load_csv, align_daily, rolling_zscore
 LAG_DAYS = 1
 
 
+BARS_PER_DAY = 288  # 5-minute bars in 24 hours
+
+
 def _daily_return(s: pd.Series) -> pd.Series:
-    """1-day return from close prices."""
-    return s.pct_change(1).astype(np.float32)
+    """1-day return from daily-ffilled close prices on 5-minute grid."""
+    return s.pct_change(BARS_PER_DAY).astype(np.float32)
 
 
 def _nday_return(s: pd.Series, n: int) -> pd.Series:
-    """N-day return from close prices."""
-    return s.pct_change(n).astype(np.float32)
+    """N-day return from daily-ffilled close prices on 5-minute grid."""
+    return s.pct_change(n * BARS_PER_DAY).astype(np.float32)
 
 
 def build_macro_features(grid: pd.DataFrame,
@@ -106,7 +109,7 @@ def build_macro_features(grid: pd.DataFrame,
         btc_price_aligned["macro_btc_close"].replace(0, np.nan)
     ).astype(np.float32)
     result["macro_eth_btc_change"] = (
-        result["macro_eth_btc_ratio"].pct_change(1).astype(np.float32)
+        result["macro_eth_btc_ratio"].pct_change(BARS_PER_DAY).astype(np.float32)
     )
 
     # ETF volume z-scores

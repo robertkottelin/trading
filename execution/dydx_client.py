@@ -130,7 +130,10 @@ class DydxClient:
             self.market_name, resolution="1MIN", limit=1
         )
         if candles and "candles" in candles and candles["candles"]:
-            return float(candles["candles"][0]["close"])
+            price = float(candles["candles"][0]["close"])
+            if price <= 0 or price != price:  # NaN check: NaN != NaN
+                raise RuntimeError(f"Invalid price from Indexer: {price}")
+            return price
         raise RuntimeError("Could not fetch current price from Indexer")
 
     async def get_latest_block_height(self) -> int:

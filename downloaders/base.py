@@ -205,23 +205,31 @@ class BaseDownloader(abc.ABC):
             if not batch:
                 break
 
-            # Check stop condition
+            # Check stop condition — save cursor from raw batch before filtering
+            raw_batch_len = len(batch)
+            raw_oldest_ts = batch[-1].get(timestamp_field) if batch else None
             if stop_iso:
                 filtered = []
+                reached_stop = False
                 for item in batch:
                     ts = item.get(timestamp_field, "")
                     if ts and ts <= stop_iso:
+                        reached_stop = True
                         continue  # skip items before stop point (already have them)
                     filtered.append(item)
                 batch = filtered
+                if reached_stop:
+                    # We've reached the boundary — no more pages needed
+                    all_data.extend(batch)
+                    break
 
             all_data.extend(batch)
 
-            if len(batch) < limit:
+            if raw_batch_len < limit:
                 break
 
-            # Next page: use oldest item in this batch
-            oldest_ts = batch[-1].get(timestamp_field)
+            # Next page: use oldest item from raw batch (pre-filter) to avoid gaps
+            oldest_ts = raw_oldest_ts
             if not oldest_ts or oldest_ts == before_val:
                 break
             before_val = oldest_ts

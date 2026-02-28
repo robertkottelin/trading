@@ -7,10 +7,10 @@ used during training, then runs predict_proba on the latest candle.
 import json
 import logging
 import os
+import pickle
 import time
 from pathlib import Path
 
-import joblib
 import numpy as np
 import pandas as pd
 
@@ -184,16 +184,16 @@ def generate_signals() -> dict:
             log.warning("Model %s failed: %s", name, e)
             signals[name] = {"error": str(e), "signal": "ERROR"}
 
-    # Compute weighted consensus score
+    # Compute weighted consensus score (only over BULLISH models)
     weighted_sum = 0.0
     weight_total = 0.0
     for s in signals.values():
         if "error" in s:
             continue
         w = s.get("quality_weight", 1.0)
-        weight_total += w
         if s["signal"] == "BULLISH":
             weighted_sum += w * s["prob"]
+            weight_total += w
         # BEARISH models would subtract, but we only have long models
 
     weighted_score = weighted_sum / weight_total if weight_total > 0 else 0.0
@@ -255,7 +255,8 @@ def _run_single_model(model_def: dict, features_df: pd.DataFrame,
             f"({nan_count / len(feature_list):.0%}) — likely insufficient warmup")
 
     # Load and predict — LightGBM
-    lgb_model = joblib.load(lgb_path)
+    with open(lgb_path, "rb") as _mf:
+        lgb_model = pickle.load(_mf)
     lgb_prob = float(lgb_model.predict_proba(X)[:, 1][0])
 
     # CatBoost ensemble if applicable
@@ -263,7 +264,8 @@ def _run_single_model(model_def: dict, features_df: pd.DataFrame,
     if use_ensemble and model_def.get("cb_file"):
         cb_path = MODELS_DIR / model_def["cb_file"]
         if cb_path.exists():
-            cb_model = joblib.load(cb_path)
+            with open(cb_path, "rb") as _mf:
+                cb_model = pickle.load(_mf)
             cb_prob = float(cb_model.predict_proba(X)[:, 1][0])
             final_prob = lgb_weight * lgb_prob + (1 - lgb_weight) * cb_prob
         else:

@@ -35,9 +35,12 @@ def _read_jsonl(path: str, max_lines: int = 500) -> list[dict]:
             for line in f:
                 line = line.strip()
                 if line:
-                    records.append(json.loads(line))
+                    try:
+                        records.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        log.warning("Skipping corrupt line in %s: %s", path, line[:100])
         return records[-max_lines:]
-    except (OSError, json.JSONDecodeError) as e:
+    except OSError as e:
         log.warning("Could not read %s: %s", path, e)
         return []
 

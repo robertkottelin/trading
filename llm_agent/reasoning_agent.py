@@ -27,7 +27,8 @@ from llm_agent import decision_manager, grok_client, trade_history
 
 log = logging.getLogger("llm_agent")
 
-HEARTBEAT_PATH = os.path.join("state_data", "heartbeat.json")
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+HEARTBEAT_PATH = os.path.join(_PROJECT_ROOT, "state_data", "heartbeat.json")
 
 
 def _write_heartbeat(stage: str, status: str = "running"):
@@ -88,47 +89,35 @@ def run(args):
     # --- Stage 0: Orphan order cleanup (live mode only) ---
     # Load config ONCE — reused by Stage 0 and Stage 7 to prevent
     # race condition if config file is modified between stages.
-    with open("config/settings.yaml") as _cfg_f:
+    cfg_path = os.path.join(_PROJECT_ROOT, "config", "settings.yaml")
+    with open(cfg_path) as _cfg_f:
         _full_cfg = yaml.safe_load(_cfg_f)
     exec_cfg = _full_cfg.get("execution", {})
     mode = exec_cfg.get("mode", "paper")
     if mode == "live" and not args.no_execute:
-        log.info("Stage 0/7: Checking for orphan orders...")
+        log.info("Stage 0/7: Checking for orphan orders + position protection...")
         try:
             from execution.dydx_client import DydxClient
             from execution.dydx_executor import DydxExecutor
 
-            async def _cleanup():
+            async def _cleanup_and_verify():
                 client = DydxClient()
                 await client.connect()
                 try:
-                    executor = DydxExecutor(client, config=exec_cfg)
-                    return await executor.cleanup_orphan_orders()
+                    executor = DydxExecutor(client, config=_full_cfg)
+                    cleaned = await executor.cleanup_orphan_orders()
+                    unprotected = await executor.verify_position_protection()
+                    return cleaned, unprotected
                 finally:
                     await client.disconnect()
 
-            cleaned = asyncio.run(_cleanup())
+            cleaned, unprotected = asyncio.run(_cleanup_and_verify())
             if cleaned > 0:
                 log.warning("Cleaned up %d orphan order(s)", cleaned)
-        except Exception as e:
-            log.warning("Orphan cleanup failed (non-fatal): %s", e)
-
-        # Verify open positions have TP/SL protection
-        try:
-            async def _verify():
-                client = DydxClient()
-                await client.connect()
-                try:
-                    executor = DydxExecutor(client, config=exec_cfg)
-                    return await executor.verify_position_protection()
-                finally:
-                    await client.disconnect()
-
-            unprotected = asyncio.run(_verify())
             if unprotected > 0:
                 log.critical("Emergency-closed %d unprotected position(s)", unprotected)
         except Exception as e:
-            log.warning("Position protection check failed (non-fatal): %s", e)
+            log.warning("Stage 0 cleanup/verify failed (non-fatal): %s", e)
 
     _write_heartbeat("stage_0_complete")
 
@@ -311,7 +300,7 @@ def _extract_market_conditions(context_text: str) -> dict:
                 conditions["dxy"] = float(val)
             except (ValueError, IndexError):
                 pass
-        elif "Binance:" in line and "ann." in line and "funding_rate" not in str(conditions):
+        elif "Binance:" in line and "ann." in line and "funding_rate" not in conditions:
             try:
                 rate_str = line.split(":")[1].strip().split()[0]
                 conditions["funding_rate"] = float(rate_str)

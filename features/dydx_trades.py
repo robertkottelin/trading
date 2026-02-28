@@ -69,10 +69,13 @@ def build_dydx_trades_features(grid: pd.DataFrame,
     # --- VWAP deviation ---
     if "dydx_vwap" in aligned.columns:
         vwap = aligned["dydx_vwap"]
-        close = spot_close["close"].values
+        # Align spot_close to the grid before computing deviation
+        close = spot_close.set_index("open_time_ms")["close"].reindex(
+            gms.values
+        ).values
         # (close - vwap) / close — positive = price above vwap
         result["dydx_vwap_deviation"] = np.where(
-            (close != 0) & (vwap != 0) & np.isfinite(vwap),
+            (close != 0) & (vwap != 0) & np.isfinite(close) & np.isfinite(vwap),
             (close - vwap) / close,
             np.nan,
         ).astype(np.float32)

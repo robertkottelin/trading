@@ -45,8 +45,9 @@ def build_implied_vol_features(grid: pd.DataFrame,
     # DVOL vs existing GARCH from base parquet
     if "garch_vol_fast" in base_df.columns:
         garch = base_df.set_index("open_time_ms")["garch_vol_fast"].reindex(gms.values)
-        # DVOL is annualized %, GARCH is per-candle — normalize GARCH to annualized
-        garch_annual = garch * np.sqrt(105192) * 100
+        # garch_vol_fast is already daily vol (per-candle * sqrt(288) in ta_core).
+        # DVOL is annualized %. To annualize daily vol: multiply by sqrt(365.25) * 100.
+        garch_annual = garch * np.sqrt(365.25) * 100
         result["dvol_vs_garch"] = (
             (result["dvol_close"].values - garch_annual.values).astype(np.float32)
         )
@@ -56,7 +57,9 @@ def build_implied_vol_features(grid: pd.DataFrame,
     # DVOL vs existing realized vol from base parquet
     if "realized_vol_288" in base_df.columns:
         rv = base_df.set_index("open_time_ms")["realized_vol_288"].reindex(gms.values)
-        rv_annual = rv * np.sqrt(105192) * 100
+        # realized_vol_288 is already daily vol (std * sqrt(288) in ta_core).
+        # Annualize: multiply by sqrt(365.25) * 100.
+        rv_annual = rv * np.sqrt(365.25) * 100
         result["dvol_vs_realized"] = (
             (result["dvol_close"].values - rv_annual.values).astype(np.float32)
         )

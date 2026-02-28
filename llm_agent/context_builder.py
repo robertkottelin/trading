@@ -11,7 +11,7 @@ import pandas as pd
 
 log = logging.getLogger(__name__)
 
-CONTEXT_DIR = Path("market_context_data")
+CONTEXT_DIR = Path(__file__).resolve().parent.parent / "market_context_data"
 
 
 def _read_csv(filename: str) -> pd.DataFrame | None:
@@ -109,28 +109,29 @@ def _section_funding() -> str:
     """Section 2: Funding rates across exchanges."""
     lines = ["FUNDING RATES:"]
 
+    # (filename, exchange, sort_col, rate_col, payments_per_day)
     sources = [
-        ("binance_funding_rates.csv", "Binance", "funding_time_ms", "funding_rate"),
-        ("bybit_funding_rates.csv", "Bybit", "funding_time_ms", "funding_rate"),
-        ("okx_funding_rates.csv", "OKX", "funding_time_ms", "funding_rate"),
-        ("dydx_funding_rates.csv", "dYdX", None, "rate"),
-        ("deribit_funding_rates.csv", "Deribit", None, "funding_rate"),
+        ("binance_funding_rates.csv", "Binance", "funding_time_ms", "funding_rate", 3),
+        ("bybit_funding_rates.csv", "Bybit", "funding_time_ms", "funding_rate", 3),
+        ("okx_funding_rates.csv", "OKX", "funding_time_ms", "funding_rate", 3),
+        ("dydx_funding_rates.csv", "dYdX", None, "rate", 24),  # hourly funding
+        ("deribit_funding_rates.csv", "Deribit", None, "interest_8h", 3),
     ]
 
-    for filename, exchange, sort_col, rate_col in sources:
+    for filename, exchange, sort_col, rate_col, ppd in sources:
         df = _read_csv(filename)
         if df is None or len(df) == 0 or rate_col not in df.columns:
             continue
         latest = _latest_rows(df, 1, sort_col).iloc[-1]
         rate = float(latest[rate_col])
-        ann_rate = rate * 3 * 365 * 100  # 8h funding annualized
+        ann_rate = rate * ppd * 365 * 100
         lines.append(f"  {exchange}: {rate:.6f} ({ann_rate:+.2f}% ann.)")
 
     # Predicted funding from Coinalyze
     pred = _read_csv("coinalyze_predicted_funding.csv")
-    if pred is not None and len(pred) > 0 and "funding_rate" in pred.columns:
-        latest = _latest_rows(pred, 1, "timestamp_ms").iloc[-1]
-        rate = float(latest["funding_rate"])
+    if pred is not None and len(pred) > 0 and "predicted_rate" in pred.columns:
+        latest = _latest_rows(pred, 1, None).iloc[-1]
+        rate = float(latest["predicted_rate"])
         lines.append(f"  Predicted next funding: {rate:.6f}")
 
     return "\n".join(lines)

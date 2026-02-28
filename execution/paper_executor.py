@@ -51,7 +51,6 @@ class PaperExecutor:
     def execute_decision(self, decision: dict) -> dict:
         """Run paper trade for *decision*.  Returns the trade record."""
         portfolio = self._fetch_portfolio()
-        price = self._fetch_current_price()
 
         # Log decision
         self._append_jsonl("decisions.jsonl", {
@@ -59,13 +58,17 @@ class PaperExecutor:
             **decision,
         })
 
-        # Risk validation
+        # Risk validation (before price fetch to avoid crash on network error
+        # bypassing risk checks)
         passed, reason = self.risk.validate_decision(decision, portfolio)
         if not passed:
             record = self._rejection_record(decision, reason)
             self._append_jsonl("trades.jsonl", record)
             log.info("Paper trade rejected: %s", reason)
             return record
+
+        # Fetch price after validation passes
+        price = self._fetch_current_price()
 
         # Simulate fill
         record = self._simulate_fill(decision, portfolio, price)

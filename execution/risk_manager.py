@@ -5,6 +5,7 @@ Pure validation — no side effects, no external deps beyond stdlib + yaml.
 
 import json
 import logging
+import math
 import os
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -33,6 +34,7 @@ class RiskManager:
         """Run all pre-trade checks.  Returns (passed, reason)."""
         checks = [
             self._check_direction,
+            self._check_numeric_fields,
             self._check_confidence,
             self._check_price_ordering,
             self._check_risk_reward,
@@ -58,6 +60,28 @@ class RiskManager:
             return False, "direction is NO_TRADE"
         if direction not in ("LONG", "SHORT"):
             return False, f"invalid direction: {direction}"
+        return True, ""
+
+    def _check_numeric_fields(self, decision: dict, portfolio: dict) -> tuple[bool, str]:
+        """Reject decisions with NaN, infinite, or negative price fields."""
+        for field in ("entry_price", "take_profit", "stop_loss",
+                      "confidence", "position_size_pct"):
+            val = decision.get(field)
+            if val is None:
+                continue
+            try:
+                val = float(val)
+            except (TypeError, ValueError):
+                return False, f"{field} is not a valid number: {decision.get(field)!r}"
+            if math.isnan(val) or math.isinf(val):
+                return False, f"{field} is NaN or infinite"
+        for field in ("entry_price", "take_profit", "stop_loss"):
+            val = decision.get(field, 0)
+            if isinstance(val, (int, float)) and val < 0:
+                return False, f"{field} is negative: {val}"
+        size_pct = decision.get("position_size_pct", 0)
+        if isinstance(size_pct, (int, float)) and size_pct <= 0:
+            return False, f"position_size_pct must be positive, got {size_pct}"
         return True, ""
 
     def _check_confidence(self, decision: dict, portfolio: dict) -> tuple[bool, str]:
@@ -107,10 +131,15 @@ class RiskManager:
         self, decision: dict, portfolio: dict
     ) -> tuple[bool, str]:
         max_open = self.cfg.get("max_open_positions", 1)
+        target_market = self.cfg.get("market", "BTC-USD")
         positions = portfolio.get("positions", [])
-        open_count = len(positions)
+        open_count = sum(
+            1 for p in positions
+            if p.get("market") == target_market
+            and abs(float(p.get("size", 0))) > 0
+        )
         if open_count >= max_open:
-            return False, f"{open_count} open position(s), max is {max_open}"
+            return False, f"{open_count} open position(s) in {target_market}, max is {max_open}"
         return True, ""
 
     def _check_free_collateral(
@@ -134,7 +163,8 @@ class RiskManager:
     ) -> tuple[bool, str]:
         max_btc = self.cfg.get("max_position_size_btc", 0.05)
         max_pct = self.cfg.get("max_position_pct", 0.25)
-        size_pct = decision.get("position_size_pct", 0)
+        # Use same default as executors (0.05) to prevent size mismatch
+        size_pct = decision.get("position_size_pct", 0.05)
 
         if size_pct > max_pct:
             return (
@@ -179,7 +209,11 @@ class RiskManager:
                     line = line.strip()
                     if not line:
                         continue
-                    snap = json.loads(line)
+                    try:
+                        snap = json.loads(line)
+                    except json.JSONDecodeError:
+                        log.debug("Skipping corrupt JSONL line in portfolio snapshots")
+                        continue
                     ts = snap.get("timestamp", "")
                     if not ts:
                         continue
@@ -191,7 +225,7 @@ class RiskManager:
                         snap_equity = snap.get("equity", 0)
                         if snap_equity > 0 and today_start_equity is None:
                             today_start_equity = snap_equity
-        except (OSError, json.JSONDecodeError) as e:
+        except OSError as e:
             log.warning("Could not read portfolio snapshots for daily loss check: %s", e)
             return False, f"daily loss check failed: could not read portfolio history ({e})"
 

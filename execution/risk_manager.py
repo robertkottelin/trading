@@ -193,7 +193,7 @@ class RiskManager:
                             today_start_equity = snap_equity
         except (OSError, json.JSONDecodeError) as e:
             log.warning("Could not read portfolio snapshots for daily loss check: %s", e)
-            return True, ""
+            return False, f"daily loss check failed: could not read portfolio history ({e})"
 
         if today_start_equity is None or today_start_equity <= 0:
             return True, ""

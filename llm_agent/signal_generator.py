@@ -7,6 +7,7 @@ used during training, then runs predict_proba on the latest candle.
 import json
 import logging
 import os
+import time
 from pathlib import Path
 
 import joblib
@@ -145,6 +146,23 @@ def generate_signals() -> dict:
     latest_ts = int(features_df["open_time_ms"].iloc[-1])
     log.info("Latest candle timestamp: %d", latest_ts)
 
+    # Check for stale market data
+    now_ms = int(time.time() * 1000)
+    staleness_ms = now_ms - latest_ts
+    staleness_minutes = staleness_ms / 60_000
+
+    if staleness_minutes > 120:  # 2 hours — data too old for reliable signals
+        log.error(
+            "Market data is %.0f minutes stale (latest candle: %d) — "
+            "skipping ML inference this cycle", staleness_minutes, latest_ts)
+        return {"signals": {}, "consensus": {}, "timestamp_ms": latest_ts,
+                "text_summary": f"ML SIGNALS: Market data too stale "
+                f"({staleness_minutes:.0f}min old) — skipping inference."}
+    elif staleness_minutes > 30:  # 30 min — warn but continue
+        log.warning(
+            "Market data is %.0f minutes stale (latest candle: %d) — "
+            "signals may be unreliable", staleness_minutes, latest_ts)
+
     # Run each model
     signals = {}
     bullish = []
@@ -263,7 +281,11 @@ def _run_single_model(model_def: dict, features_df: pd.DataFrame,
     parts = target.replace("target_", "").split("_")
     direction = parts[0]  # "up" or "fav"
     thresh_str = parts[-1]
-    threshold_decimal = float(thresh_str[0] + "." + thresh_str[1:])
+    try:
+        threshold_decimal = float(thresh_str[0] + "." + thresh_str[1:])
+    except (IndexError, ValueError):
+        log.warning("Could not parse threshold from target '%s' — defaulting to 0", target)
+        threshold_decimal = 0.0
     threshold_pct = threshold_decimal * 100
 
     # Signal strength classification

@@ -139,3 +139,6 @@ strategies:
     - sentiment_flow
     - trend_following
     - momentum_composite
+    - macro_regime
+    - basis_reversion
+    - taker_flow

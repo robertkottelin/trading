@@ -1,7 +1,7 @@
-"""ML Model Inference — load 25 trained models and generate signals on latest data.
+"""ML Model Inference — load trained models and generate signals on latest data.
 
-Reuses features.ta_core and features.cross_exchange to compute the same features
-used during training, then runs predict_proba on the latest candle.
+Loads bullish models from models/v23/ and (if available) bearish models from
+models/bearish/. Both configs use the same feature matrix built from market_context_data.
 """
 
 import json
@@ -31,6 +31,8 @@ log = logging.getLogger(__name__)
 
 MODELS_DIR = Path("models/v23")
 CONFIG_FILE = MODELS_DIR / "production_config_v23.json"
+BEARISH_MODELS_DIR = Path("models/bearish")
+BEARISH_CONFIG_FILE = BEARISH_MODELS_DIR / "production_config_bearish.json"
 CONTEXT_DIR = Path("market_context_data")
 
 # Need enough history for the longest rolling window (288 candles = 24h)
@@ -40,6 +42,18 @@ MIN_CANDLES = 350
 def _load_config() -> dict:
     with open(CONFIG_FILE) as f:
         return json.load(f)
+
+
+def _load_bearish_config() -> dict | None:
+    """Load bearish model config if it exists. Returns None if not yet trained."""
+    if not BEARISH_CONFIG_FILE.exists():
+        return None
+    try:
+        with open(BEARISH_CONFIG_FILE) as f:
+            return json.load(f)
+    except Exception as e:
+        log.warning("Could not load bearish config: %s", e)
+        return None
 
 
 def _load_klines(filename: str, ts_col: str = "open_time_ms") -> pd.DataFrame:
@@ -156,7 +170,7 @@ def _build_features() -> pd.DataFrame:
 
 
 def generate_signals() -> dict:
-    """Run inference on all 25 models and return structured signals.
+    """Run inference on all bullish + bearish models and return structured signals.
 
     Returns:
         {
@@ -170,7 +184,13 @@ def generate_signals() -> dict:
     models_list = config["models"]
     model_weights = config.get("model_weights", {})
 
-    # Build feature matrix
+    # Load bearish models if available (graceful degradation)
+    bearish_config = _load_bearish_config()
+    bearish_models_list = bearish_config["models"] if bearish_config else []
+    if bearish_models_list:
+        log.info("Bearish models available: %d", len(bearish_models_list))
+
+    # Build feature matrix (shared by all models)
     features_df = _build_features()
     if features_df.empty:
         return {"signals": {}, "consensus": {}, "timestamp_ms": 0,
@@ -179,7 +199,7 @@ def generate_signals() -> dict:
     latest_ts = int(features_df["open_time_ms"].iloc[-1])
     log.info("Latest candle timestamp: %d", latest_ts)
 
-    # Run each model
+    # Run bullish models
     signals = {}
     bullish = []
     bearish = []
@@ -200,8 +220,28 @@ def generate_signals() -> dict:
             log.warning("Model %s failed: %s", name, e)
             signals[name] = {"error": str(e), "signal": "ERROR"}
 
-    # Compute weighted consensus score
-    weighted_sum = 0.0
+    # Run bearish models (from models/bearish/ if trained)
+    for model_def in bearish_models_list:
+        name = model_def["name"]
+        try:
+            result = _run_single_model(
+                model_def, features_df, {},
+                models_dir=BEARISH_MODELS_DIR,
+                force_direction="BEARISH",
+            )
+            signals[name] = result
+            if result["signal"] == "BEARISH":
+                bearish.append(result)
+            else:
+                neutral.append(result)
+        except Exception as e:
+            log.warning("Bearish model %s failed: %s", name, e)
+            signals[name] = {"error": str(e), "signal": "ERROR"}
+
+    # Compute weighted consensus score:
+    # bullish models push score positive, bearish models push it negative
+    bull_weighted = 0.0
+    bear_weighted = 0.0
     weight_total = 0.0
     for s in signals.values():
         if "error" in s:
@@ -209,16 +249,21 @@ def generate_signals() -> dict:
         w = s.get("quality_weight", 1.0)
         weight_total += w
         if s["signal"] == "BULLISH":
-            weighted_sum += w * s["prob"]
-        # BEARISH models would subtract, but we only have long models
+            bull_weighted += w * s["prob"]
+        elif s["signal"] == "BEARISH":
+            bear_weighted += w * s["prob"]
 
-    weighted_score = weighted_sum / weight_total if weight_total > 0 else 0.0
+    if weight_total > 0:
+        weighted_score = (bull_weighted - bear_weighted) / weight_total
+    else:
+        weighted_score = 0.0
 
+    total_models = len(models_list) + len(bearish_models_list)
     consensus = {
         "bullish_count": len(bullish),
         "bearish_count": len(bearish),
         "neutral_count": len(neutral),
-        "total": len(models_list),
+        "total": total_models,
         "weighted_score": round(weighted_score, 4),
     }
 
@@ -233,10 +278,23 @@ def generate_signals() -> dict:
 
 
 def _run_single_model(model_def: dict, features_df: pd.DataFrame,
-                       model_weights: dict) -> dict:
-    """Run a single model on the latest row of features_df."""
+                       model_weights: dict,
+                       models_dir: Path | None = None,
+                       force_direction: str | None = None) -> dict:
+    """Run a single model on the latest row of features_df.
+
+    Args:
+        model_def: Model config dict with name, lgb_file, features, etc.
+        features_df: Full feature matrix (latest row used for inference).
+        model_weights: Optional quality-weight overrides (bullish models only).
+        models_dir: Directory to load model files from. Defaults to MODELS_DIR.
+        force_direction: If set ("BEARISH"), override the signal direction when firing.
+    """
+    if models_dir is None:
+        models_dir = MODELS_DIR
+
     name = model_def["name"]
-    lgb_path = MODELS_DIR / model_def["lgb_file"]
+    lgb_path = models_dir / model_def["lgb_file"]
     feature_list = model_def["features"]
     prob_threshold = model_def["prob_threshold"]
     horizon = model_def["horizon"]
@@ -277,7 +335,7 @@ def _run_single_model(model_def: dict, features_df: pd.DataFrame,
     # CatBoost ensemble if applicable
     final_prob = lgb_prob
     if use_ensemble and model_def.get("cb_file"):
-        cb_path = MODELS_DIR / model_def["cb_file"]
+        cb_path = models_dir / model_def["cb_file"]
         if cb_path.exists():
             cb_model = joblib.load(cb_path)
             cb_prob = float(cb_model.predict_proba(X)[:, 1][0])
@@ -290,14 +348,17 @@ def _run_single_model(model_def: dict, features_df: pd.DataFrame,
 
     # Parse target info for human-readable description
     # target format: target_up_12_0002 → horizon=12 candles (60min), threshold=0.2%
+    #                target_down_12_0003 → horizon=12 candles, threshold=0.3% (bearish)
     # Threshold label is str(float).replace(".", ""):
     #   0.002→"0002", 0.003→"0003", 0.005→"0005", 0.01→"001"
-    # Reverse: insert "." after first char → "0.002", "0.003", "0.005", "0.01"
     horizon_minutes = horizon * 5
     parts = target.replace("target_", "").split("_")
-    direction = parts[0]  # "up" or "fav"
+    tgt_direction = parts[0]  # "up", "fav", or "down"
     thresh_str = parts[-1]
-    threshold_decimal = float(thresh_str[0] + "." + thresh_str[1:])
+    try:
+        threshold_decimal = float(thresh_str[0] + "." + thresh_str[1:])
+    except (ValueError, IndexError):
+        threshold_decimal = 0.0
     threshold_pct = threshold_decimal * 100
 
     # Signal strength classification
@@ -312,8 +373,11 @@ def _run_single_model(model_def: dict, features_df: pd.DataFrame,
             strength = "MODERATE"
         else:
             strength = "WEAK"
-        # All models in v23 are long-only (up/fav/favorable targets)
-        signal = "BULLISH"
+        # Bearish (down_*) targets or forced-bearish direction → BEARISH signal
+        if force_direction == "BEARISH" or tgt_direction == "down":
+            signal = "BEARISH"
+        else:
+            signal = "BULLISH"
 
     return {
         "prob": round(final_prob, 4),
@@ -321,7 +385,7 @@ def _run_single_model(model_def: dict, features_df: pd.DataFrame,
         "signal": signal,
         "strength": strength,
         "target": target,
-        "direction": direction,
+        "direction": tgt_direction,
         "horizon_candles": horizon,
         "horizon_minutes": horizon_minutes,
         "threshold_pct": threshold_pct,
@@ -334,8 +398,8 @@ def _format_signals_text(signals: dict, consensus: dict) -> str:
     """Format signals into structured text for the LLM prompt."""
     lines = []
     total = consensus["total"]
-    b = consensus["bullish_count"]
-    n = consensus["neutral_count"]
+    b_count = consensus["bullish_count"]
+    bear_count = consensus["bearish_count"]
     lines.append(f"ML MODEL SIGNALS ({total} models, latest 5-min candle):")
 
     # Bullish signals (firing)
@@ -350,11 +414,23 @@ def _format_signals_text(signals: dict, consensus: dict) -> str:
                 f"| weight={s['quality_weight']:.2f} | {s['strength']}"
             )
 
+    # Bearish signals (firing)
+    bearish_firing = [(k, v) for k, v in signals.items()
+                      if v.get("signal") == "BEARISH"]
+    if bearish_firing:
+        lines.append(f"  BEARISH signals ({len(bearish_firing)} firing — downside models):")
+        for name, s in sorted(bearish_firing, key=lambda x: -x[1]["prob"]):
+            lines.append(
+                f"    {name}: prob={s['prob']:.2f} (thresh={s['threshold']:.2f}) "
+                f"| {s['horizon_minutes']}min -{s['threshold_pct']}% "
+                f"| weight={s['quality_weight']:.2f} | {s['strength']}"
+            )
+
     # Neutral signals (not firing)
     neutrals = [(k, v) for k, v in signals.items()
                 if v.get("signal") == "NEUTRAL"]
     if neutrals:
-        lines.append(f"  NEUTRAL signals ({len(neutrals)} not firing):")
+        lines.append(f"  NEUTRAL/not-firing ({len(neutrals)}):")
         for name, s in sorted(neutrals, key=lambda x: -x[1].get("prob", 0)):
             prob = s.get("prob", 0)
             thresh = s.get("threshold", 0)
@@ -363,7 +439,7 @@ def _format_signals_text(signals: dict, consensus: dict) -> str:
             w = s.get("quality_weight", 0)
             lines.append(
                 f"    {name}: prob={prob:.2f} (thresh={thresh:.2f}) "
-                f"| {hm}min +{tp}% | weight={w:.2f}"
+                f"| {hm}min | weight={w:.2f}"
             )
 
     # Errors
@@ -375,9 +451,10 @@ def _format_signals_text(signals: dict, consensus: dict) -> str:
 
     ws = consensus["weighted_score"]
     lines.append(
-        f"  Consensus: {b}/{total} bullish, "
-        f"{consensus['bearish_count']}/{total} bearish, "
-        f"weighted score: {ws:+.4f}"
+        f"  Consensus: {b_count}/{total} bullish, "
+        f"{bear_count}/{total} bearish, "
+        f"net weighted score: {ws:+.4f} "
+        f"(positive=bullish bias, negative=bearish bias)"
     )
 
     return "\n".join(lines)

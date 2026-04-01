@@ -1,4 +1,4 @@
-"""Strategy Engine — runs all 6 selected strategies and formats output for LLM.
+"""Strategy Engine — runs all 9 selected strategies and formats output for LLM.
 
 Usage:
     # In pipeline (uses market_context_data/):
@@ -24,12 +24,15 @@ from strategies.liquidation_flow import LiquidationFlow
 from strategies.sentiment_flow import SentimentFlow
 from strategies.trend_following import TrendFollowing
 from strategies.momentum_composite import MomentumComposite
+from strategies.macro_regime import MacroRegime
+from strategies.basis_reversion import BasisReversion
+from strategies.taker_flow import TakerFlowImbalance
 
 log = logging.getLogger(__name__)
 
 
 def get_selected_strategies() -> list[BaseStrategy]:
-    """Return the 6 selected production strategies."""
+    """Return the 9 selected production strategies."""
     return [
         FundingRateReversion(),
         VolatilityRegime(),
@@ -37,6 +40,9 @@ def get_selected_strategies() -> list[BaseStrategy]:
         SentimentFlow(),
         TrendFollowing(),
         MomentumComposite(),
+        MacroRegime(),
+        BasisReversion(),
+        TakerFlowImbalance(),
     ]
 
 

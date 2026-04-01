@@ -10,6 +10,9 @@ Usage:
   python -m downloaders.market_context                    # all 14, last 24h
   python -m downloaders.market_context --hours 48         # last 48h
   python -m downloaders.market_context --sources dydx,binance  # specific sources
+  python -m downloaders.market_context --tier fast        # fast-tier only (4 exchange sources)
+  python -m downloaders.market_context --tier medium      # fast + medium tiers
+  python -m downloaders.market_context --tier slow        # fast + medium + slow (= all)
 """
 
 import argparse
@@ -18,10 +21,47 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import yaml
+
 from downloaders.download_all import DOWNLOADERS
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 MARKET_CONTEXT_DIR = PROJECT_ROOT / "market_context_data"
+
+# Tier definitions — loaded from config, with hardcoded fallbacks
+_DEFAULT_TIERS = {
+    "fast": ["dydx", "binance", "bybit", "okx"],
+    "medium": ["deribit", "hyperliquid", "coinbase_premium", "coinalyze"],
+    "slow": ["macro", "sentiment", "btc_network", "blockchain", "defi", "cftc"],
+}
+
+
+def _load_tier_sources() -> dict[str, list[str]]:
+    """Load tier source lists from config/settings.yaml, falling back to defaults."""
+    cfg_path = PROJECT_ROOT / "config" / "settings.yaml"
+    try:
+        with open(cfg_path) as f:
+            cfg = yaml.safe_load(f)
+        return cfg.get("pipeline", {}).get("tier_sources", _DEFAULT_TIERS)
+    except Exception:
+        return _DEFAULT_TIERS
+
+
+def resolve_tier_sources(tier: str) -> list[str]:
+    """Return the list of source names for a given tier level.
+
+    Tiers are cumulative: 'fast' → fast only, 'medium' → fast+medium,
+    'slow' or 'all' → all sources.
+    """
+    tiers = _load_tier_sources()
+    if tier == "fast":
+        return list(tiers.get("fast", []))
+    elif tier == "medium":
+        return list(tiers.get("fast", [])) + list(tiers.get("medium", []))
+    else:  # "slow" or "all"
+        return (list(tiers.get("fast", []))
+                + list(tiers.get("medium", []))
+                + list(tiers.get("slow", [])))
 
 
 def setup_logging():
@@ -43,11 +83,15 @@ def main():
                         help="Hours of recent data to fetch (default: 24)")
     parser.add_argument("--sources", type=str, default="",
                         help="Comma-separated list of sources (default: all)")
+    parser.add_argument("--tier", type=str, default="",
+                        choices=["", "fast", "medium", "slow", "all"],
+                        help="Download tier: fast (4 exchanges), medium (+4 hourly), "
+                             "slow/all (+6 daily). Cumulative. Overridden by --sources.")
     args = parser.parse_args()
 
     log = setup_logging()
 
-    # Determine which sources to run
+    # Determine which sources to run (--sources takes precedence over --tier)
     if args.sources:
         requested = [s.strip() for s in args.sources.split(",")]
         unknown = [s for s in requested if s not in DOWNLOADERS]
@@ -56,6 +100,13 @@ def main():
                       ", ".join(unknown), ", ".join(DOWNLOADERS.keys()))
             raise SystemExit(1)
         sources = {k: DOWNLOADERS[k] for k in requested}
+    elif args.tier:
+        requested = resolve_tier_sources(args.tier)
+        unknown = [s for s in requested if s not in DOWNLOADERS]
+        if unknown:
+            log.warning("Tier references unknown sources (skipping): %s",
+                        ", ".join(unknown))
+        sources = {k: DOWNLOADERS[k] for k in requested if k in DOWNLOADERS}
     else:
         sources = DOWNLOADERS
 

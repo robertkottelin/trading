@@ -29,6 +29,17 @@ CONFIG_DIR = PROJECT_ROOT / "config"
 SETTINGS_FILE = CONFIG_DIR / "settings.yaml"
 ENV_FILE = PROJECT_ROOT / ".env"
 
+# ---------------------------------------------------------------------------
+# Pagination defaults
+# ---------------------------------------------------------------------------
+
+DEFAULT_MS_PAGE_LIMIT = 1000
+DEFAULT_MS_STEP = 5 * 60 * 1000   # 5 minutes in ms
+DEFAULT_MS_DELAY = 0.3             # seconds between requests
+
+DEFAULT_ISO_PAGE_LIMIT = 100
+DEFAULT_ISO_DELAY = 0.5
+
 
 # ---------------------------------------------------------------------------
 # BaseDownloader ABC
@@ -126,7 +137,8 @@ class BaseDownloader(abc.ABC):
     # ---- Pagination: forward by millisecond timestamps (Binance-style) ----
 
     def _paginate_by_ms(self, url, params_base, start_ms, end_ms=None,
-                        limit=1000, step_ms=5 * 60 * 1000, delay=0.3,
+                        limit=DEFAULT_MS_PAGE_LIMIT, step_ms=DEFAULT_MS_STEP,
+                        delay=DEFAULT_MS_DELAY,
                         start_key="startTime", end_key="endTime"):
         """Forward pagination via millisecond timestamps.
 
@@ -137,7 +149,7 @@ class BaseDownloader(abc.ABC):
         all_data = []
         current = start_ms
         req_count = 0
-        while current < end_ms:
+        while current <= end_ms:
             params = {**params_base, start_key: current, end_key: end_ms, "limit": limit}
             try:
                 resp = self._http_get(url, params)
@@ -168,7 +180,9 @@ class BaseDownloader(abc.ABC):
     # ---- Pagination: backward by ISO timestamps (dYdX-style) ----
 
     def _paginate_backward_iso(self, url, params_base, before_key="createdBeforeOrAt",
-                               timestamp_field="createdAt", limit=100, delay=0.5,
+                               timestamp_field="createdAt",
+                               limit=DEFAULT_ISO_PAGE_LIMIT,
+                               delay=DEFAULT_ISO_DELAY,
                                start_iso=None, stop_iso=None):
         """Backward pagination for APIs that return newest-first.
 

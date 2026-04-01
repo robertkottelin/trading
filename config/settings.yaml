@@ -88,3 +88,48 @@ hyperliquid:
 cftc:
   max_retries: 3
   rate_limit_delay: 1.0
+
+# Execution settings — trade placement and risk management
+execution:
+  mode: live                      # "paper" or "live" — overridden by CLI flags
+  network: testnet                # "testnet" or "mainnet"
+  market: BTC-USD
+  clob_pair_id: 0
+  subaccount_number: 0
+  mainnet_rest_indexer: "https://indexer.dydx.trade/v4"
+  testnet_rest_indexer: "https://indexer.v4testnet.dydx.exchange/v4"
+  short_term_block_offset: 10
+  order_confirmation_wait_s: 5      # legacy — use fill_poll settings below
+  fill_poll_max_attempts: 30        # max times to check Indexer for fill
+  fill_poll_interval_s: 3           # seconds between fill poll attempts (total max wait: 90s)
+  confidence_threshold: 0.65
+  max_position_size_btc: 0.05
+  max_position_pct: 0.25
+  min_position_size_usd: 20
+  max_position_size_usd: 500
+  max_daily_loss_pct: 2.0
+  max_open_positions: 1
+  min_free_collateral_pct: 20.0
+  min_equity_usd: 50
+  state_data_dir: state_data
+
+# Pipeline timing — tiered download schedule
+pipeline:
+  tier_medium_interval: 6    # run medium-tier sources every N cycles (~30 min at 300s)
+  tier_slow_interval: 72     # run slow-tier sources every N cycles (~6 hours at 300s)
+  tier_sources:
+    fast: [dydx, binance, bybit, okx]
+    medium: [deribit, hyperliquid, coinbase_premium, coinalyze]
+    slow: [macro, sentiment, btc_network, blockchain, defi, cftc]
+
+# Conventional strategy settings
+strategies:
+  enabled: true
+  data_dir: raw_data              # Full history needed for strategy signal computation
+  selected:
+    - funding_rate
+    - volatility_regime
+    - liquidation_flow
+    - sentiment_flow
+    - trend_following
+    - momentum_composite

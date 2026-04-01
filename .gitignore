@@ -39,6 +39,9 @@ llm_agent/decision.json
 llm_agent/decision_history.json
 llm_agent/logs/
 
+# Execution state (trade logs, portfolio snapshots)
+state_data/
+
 # Claude Code
 .claude_tmp/
 .claude/settings.local.json

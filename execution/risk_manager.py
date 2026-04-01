@@ -33,6 +33,7 @@ class RiskManager:
         """Run all pre-trade checks.  Returns (passed, reason)."""
         checks = [
             self._check_direction,
+            self._check_min_equity,
             self._check_confidence,
             self._check_price_ordering,
             self._check_risk_reward,
@@ -58,6 +59,18 @@ class RiskManager:
             return False, "direction is NO_TRADE"
         if direction not in ("LONG", "SHORT"):
             return False, f"invalid direction: {direction}"
+        return True, ""
+
+    def _check_min_equity(self, decision: dict, portfolio: dict) -> tuple[bool, str]:
+        min_equity = self.cfg.get("min_equity_usd", 50)
+        equity = portfolio.get("equity", 0)
+        if equity <= 0:
+            return False, "equity is zero or negative"
+        if equity < min_equity:
+            return (
+                False,
+                f"equity ${equity:.2f} below minimum ${min_equity:.2f} — halting to preserve capital",
+            )
         return True, ""
 
     def _check_confidence(self, decision: dict, portfolio: dict) -> tuple[bool, str]:
@@ -132,25 +145,37 @@ class RiskManager:
     def _check_position_size(
         self, decision: dict, portfolio: dict
     ) -> tuple[bool, str]:
+        min_usd = self.cfg.get("min_position_size_usd", 20)
+        max_usd = self.cfg.get("max_position_size_usd", 500)
         max_btc = self.cfg.get("max_position_size_btc", 0.05)
-        max_pct = self.cfg.get("max_position_pct", 0.25)
-        size_pct = decision.get("position_size_pct", 0)
 
-        if size_pct > max_pct:
+        size_usd = decision.get("position_size_usd")
+
+        # Legacy fallback: convert position_size_pct to USD for old decision files
+        if size_usd is None:
+            size_pct = decision.get("position_size_pct", 0)
+            equity = portfolio.get("equity", 0)
+            size_usd = equity * size_pct if equity > 0 else 0
+
+        if size_usd < min_usd:
             return (
                 False,
-                f"position_size_pct {size_pct:.2%} exceeds max {max_pct:.2%}",
+                f"position_size_usd ${size_usd:.0f} below minimum ${min_usd:.0f}",
+            )
+        if size_usd > max_usd:
+            return (
+                False,
+                f"position_size_usd ${size_usd:.0f} exceeds maximum ${max_usd:.0f}",
             )
 
-        # Check absolute BTC size if we can compute it
-        equity = portfolio.get("equity", 0)
+        # Also guard against implied BTC size exceeding the absolute BTC cap
         entry = decision.get("entry_price", 0)
-        if equity > 0 and entry > 0:
-            btc_size = (equity * size_pct) / entry
+        if entry > 0:
+            btc_size = size_usd / entry
             if btc_size > max_btc:
                 return (
                     False,
-                    f"BTC size {btc_size:.4f} exceeds max {max_btc} BTC",
+                    f"implied BTC size {btc_size:.4f} exceeds max {max_btc} BTC",
                 )
         return True, ""
 

@@ -15,6 +15,17 @@ import pandas as pd
 
 from features.ta_core import compute_ta_features
 from features.cross_exchange import build_cross_exchange_features
+from features.funding import build_funding_features
+from features.open_interest import build_open_interest_features
+from features.positioning import build_positioning_features
+from features.volatility_implied import build_implied_vol_features
+from features.macro import build_macro_features
+from features.sentiment import build_sentiment_features
+from features.onchain import build_onchain_features
+from features.defi import build_defi_features
+from features.coinalyze import build_coinalyze_features
+from features.dydx_trades import build_dydx_trades_features
+from features.liquidations import build_liquidation_features
 
 log = logging.getLogger(__name__)
 
@@ -101,20 +112,43 @@ def _build_features() -> pd.DataFrame:
     if bnc_feats is not None:
         result = result.merge(bnc_feats, on="open_time_ms", how="left")
 
-    # Cross-exchange features (uses load_csv from alignment which reads raw_data/)
-    # We need to temporarily point alignment.DATA_DIR to market_context_data
+    # Supplementary features — all builders use alignment.DATA_DIR to find CSVs.
+    # Temporarily point it at market_context_data/ instead of raw_data/.
     import features.alignment as alignment_mod
     orig_data_dir = alignment_mod.DATA_DIR
     try:
         alignment_mod.DATA_DIR = str(CONTEXT_DIR)
+
         spot = _load_klines("binance_spot_klines_5m.csv")
         spot_close = spot[["open_time_ms", "close"]].copy()
         grid = result[["open_time_ms"]].copy()
-        log.info("Computing cross-exchange features...")
-        cross_feats = build_cross_exchange_features(grid, spot_close)
-        result = result.merge(cross_feats, on="open_time_ms", how="left")
-    except Exception as e:
-        log.warning("Cross-exchange features failed: %s", e)
+
+        builders = [
+            ("Cross-exchange", lambda: build_cross_exchange_features(grid, spot_close)),
+            ("Funding",        lambda: build_funding_features(grid)),
+            ("Open Interest",  lambda: build_open_interest_features(grid)),
+            ("Positioning",    lambda: build_positioning_features(grid)),
+            ("Implied Vol",    lambda: build_implied_vol_features(grid, dydx_ohlcv)),
+            ("Macro",          lambda: build_macro_features(grid, spot_close)),
+            ("Sentiment",      lambda: build_sentiment_features(grid)),
+            ("On-chain",       lambda: build_onchain_features(grid)),
+            ("DeFi",           lambda: build_defi_features(grid)),
+            ("Coinalyze",      lambda: build_coinalyze_features(grid)),
+            ("dYdX Trades",    lambda: build_dydx_trades_features(grid, spot_close)),
+            ("Liquidations",   lambda: build_liquidation_features(grid)),
+        ]
+
+        for name, builder in builders:
+            try:
+                feat_df = builder()
+                new_cols = [c for c in feat_df.columns if c != "open_time_ms"]
+                if new_cols:
+                    result = result.merge(feat_df, on="open_time_ms", how="left")
+                log.info("  %-20s +%d features", name, len(new_cols))
+            except FileNotFoundError as e:
+                log.warning("  %-20s SKIPPED (missing: %s)", name, os.path.basename(str(e)))
+            except Exception as e:
+                log.warning("  %-20s FAILED: %s", name, e)
     finally:
         alignment_mod.DATA_DIR = orig_data_dir
 

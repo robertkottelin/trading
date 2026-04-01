@@ -83,9 +83,9 @@ class DydxExecutor:
         order_params = self._build_order_params(decision, portfolio, price)
 
         # 5b. Reject if computed size is below dYdX minimum
-        if order_params["size_btc"] < 0.001:
+        if order_params["size_btc"] < 0.0001:
             record = self._rejection_record(
-                decision, "computed position size below 0.001 BTC minimum"
+                decision, "computed position size below 0.0001 BTC minimum"
             )
             self._append_jsonl("trades.jsonl", record)
             log.info("Trade rejected: size too small")
@@ -195,6 +195,220 @@ class DydxExecutor:
 
         return cancelled
 
+    async def verify_position_orders(self) -> dict:
+        """Check that every open position has active TP/SL orders.
+
+        If a position is missing TP and/or SL, attempt to re-place them
+        using default risk parameters (SL at 1% adverse, TP at 1.5% favorable).
+
+        Returns a dict with:
+            positions_checked: int
+            unprotected: list of markets missing TP and/or SL
+            reprotected: list of markets where TP/SL were re-placed
+        """
+        result = {"positions_checked": 0, "unprotected": [], "reprotected": []}
+
+        try:
+            portfolio = await self.dydx.get_portfolio_state()
+            open_orders = await self.dydx.get_open_orders()
+        except Exception as e:
+            log.error("Failed to fetch state for position monitoring: %s", e)
+            return result
+
+        positions = portfolio.get("positions", [])
+        result["positions_checked"] = len(positions)
+
+        if not positions:
+            log.info("Position monitor: no open positions")
+            return result
+
+        # Build a map: market -> set of order types (TAKE_PROFIT, STOP_LIMIT, etc.)
+        orders_by_market: dict[str, set[str]] = {}
+        for o in open_orders:
+            mkt = o["market"]
+            if mkt not in orders_by_market:
+                orders_by_market[mkt] = set()
+            orders_by_market[mkt].add(o["type"])
+
+        for pos in positions:
+            market = pos["market"]
+            order_types = orders_by_market.get(market, set())
+
+            has_tp = any("PROFIT" in t.upper() for t in order_types)
+            has_sl = any("STOP" in t.upper() for t in order_types)
+
+            if has_tp and has_sl:
+                log.info("Position monitor: %s has TP + SL — OK", market)
+                continue
+
+            missing = []
+            if not has_tp:
+                missing.append("TP")
+            if not has_sl:
+                missing.append("SL")
+
+            log.warning(
+                "Position monitor: %s MISSING %s — position is %s %s @ %s",
+                market, "+".join(missing),
+                pos["side"], pos["size"], pos["entry_price"],
+            )
+
+            self._append_jsonl("trades.jsonl", {
+                "timestamp": _ts(),
+                "action": "POSITION_UNPROTECTED",
+                "market": market,
+                "side": pos["side"],
+                "size": pos["size"],
+                "entry_price": pos["entry_price"],
+                "missing_orders": missing,
+                "mode": "live",
+                "status": "ALERT",
+            })
+
+            # Attempt to re-place missing protective orders
+            reprotected = await self._reprotect_position(pos, has_tp, has_sl)
+            if reprotected:
+                result["reprotected"].append({
+                    "market": market,
+                    "side": pos["side"],
+                    "orders_placed": reprotected,
+                })
+            else:
+                result["unprotected"].append({
+                    "market": market,
+                    "side": pos["side"],
+                    "size": pos["size"],
+                    "entry_price": pos["entry_price"],
+                    "missing": missing,
+                })
+
+        return result
+
+    async def _reprotect_position(
+        self, pos: dict, has_tp: bool, has_sl: bool
+    ) -> list[str]:
+        """Place missing TP/SL orders for an unprotected position.
+
+        Uses default risk parameters:
+          - SL: 1% adverse from entry price
+          - TP: 1.5% favorable from entry price
+          - GTT: 24 hours
+
+        Returns list of order types successfully placed, e.g. ["TP", "SL"].
+        """
+        from dydx4.clients.helpers.chain_helpers import (
+            OrderType, OrderSide, OrderTimeInForce, OrderExecution,
+        )
+
+        entry_price = float(pos["entry_price"])
+        size = float(pos["size"])
+        side = pos["side"]  # "LONG" or "SHORT"
+        market = pos["market"]
+
+        sl_pct = self.cfg.get("reprotect_sl_pct", 0.01)
+        tp_pct = self.cfg.get("reprotect_tp_pct", 0.015)
+        gtt_seconds = 86400  # 24h max
+
+        if side == "LONG":
+            sl_price = round(entry_price * (1 - sl_pct), 0)
+            tp_price = round(entry_price * (1 + tp_pct), 0)
+            close_side = OrderSide.SELL
+        else:
+            sl_price = round(entry_price * (1 + sl_pct), 0)
+            tp_price = round(entry_price * (1 - tp_pct), 0)
+            close_side = OrderSide.BUY
+
+        placed = []
+
+        # Place TP if missing
+        if not has_tp:
+            try:
+                self.dydx.client.place_order(
+                    self.dydx.subaccount,
+                    market=market,
+                    type=OrderType.TAKE_PROFIT_MARKET,
+                    side=close_side,
+                    price=tp_price,
+                    size=size,
+                    client_id=random.randint(0, MAX_CLIENT_ID),
+                    time_in_force=OrderTimeInForce.GTT,
+                    good_til_block=0,
+                    good_til_time_in_seconds=gtt_seconds,
+                    execution=OrderExecution.IOC,
+                    post_only=False,
+                    reduce_only=True,
+                    trigger_price=tp_price,
+                )
+                log.info("Re-placed TP at $%.0f for %s %s", tp_price, side, market)
+                placed.append("TP")
+                self._append_jsonl("trades.jsonl", {
+                    "timestamp": _ts(),
+                    "action": "REPROTECT_TP",
+                    "market": market,
+                    "side": side,
+                    "size": size,
+                    "tp_price": tp_price,
+                    "entry_price": entry_price,
+                    "mode": "live",
+                    "status": "PLACED",
+                })
+            except Exception as e:
+                log.error("Failed to re-place TP for %s: %s", market, e)
+
+        # Place SL if missing
+        if not has_sl:
+            try:
+                # Add 1% slippage tolerance so SL fills in fast drops
+                if close_side == OrderSide.SELL:
+                    sl_limit = round(sl_price * 0.99)
+                else:
+                    sl_limit = round(sl_price * 1.01)
+                self.dydx.client.place_order(
+                    self.dydx.subaccount,
+                    market=market,
+                    type=OrderType.STOP_MARKET,
+                    side=close_side,
+                    price=sl_limit,
+                    size=size,
+                    client_id=random.randint(0, MAX_CLIENT_ID),
+                    time_in_force=OrderTimeInForce.GTT,
+                    good_til_block=0,
+                    good_til_time_in_seconds=gtt_seconds,
+                    execution=OrderExecution.IOC,
+                    post_only=False,
+                    reduce_only=True,
+                    trigger_price=sl_price,
+                )
+                log.info("Re-placed SL at $%.0f (limit $%.0f) for %s %s", sl_price, sl_limit, side, market)
+                placed.append("SL")
+                self._append_jsonl("trades.jsonl", {
+                    "timestamp": _ts(),
+                    "action": "REPROTECT_SL",
+                    "market": market,
+                    "side": side,
+                    "size": size,
+                    "sl_price": sl_price,
+                    "entry_price": entry_price,
+                    "mode": "live",
+                    "status": "PLACED",
+                })
+            except Exception as e:
+                log.error("Failed to re-place SL for %s: %s", market, e)
+                # SL is critical — if it fails and we couldn't place it,
+                # attempt emergency close
+                if not placed:  # Neither TP nor SL placed
+                    log.warning("Cannot protect position — attempting emergency close")
+                    from dydx4.clients.helpers.chain_helpers import OrderSide as OS
+                    await self._emergency_close(
+                        {"size_btc": size, "market_price": entry_price},
+                        close_side,
+                    )
+
+        if placed:
+            log.info("Re-protected %s position with %s", market, "+".join(placed))
+
+        return placed
+
     # ------------------------------------------------------------------
     # Order building
     # ------------------------------------------------------------------
@@ -204,16 +418,21 @@ class DydxExecutor:
     ) -> dict:
         direction = decision["direction"]
         equity = portfolio["equity"]
-        size_pct = decision.get("position_size_pct", 0.05)
         max_btc = self.cfg.get("max_position_size_btc", 0.05)
 
-        size_btc = (equity * size_pct) / market_price if market_price > 0 else 0
-        size_btc = min(size_btc, max_btc)
-        size_btc = round(size_btc, 3)  # dYdX BTC-USD step size
-        if size_btc < 0.001:
-            size_btc = 0  # signal caller to reject — too small to trade
+        # USD-denominated sizing (preferred); legacy pct fallback for old decision files
+        size_usd = decision.get("position_size_usd")
+        if size_usd is None:
+            size_pct = decision.get("position_size_pct", 0.05)
+            size_usd = equity * size_pct
 
-        from dydxv4.clients.constants import OrderSide
+        size_btc = size_usd / market_price if market_price > 0 else 0
+        size_btc = min(size_btc, max_btc)
+        size_btc = round(size_btc, 4)  # dYdX BTC-USD step size (0.0001)
+        if size_btc < 0.0001 and equity > 0 and market_price > 0:
+            size_btc = 0.0001  # floor to dYdX minimum for small accounts
+
+        from dydx4.clients.helpers.chain_helpers import OrderSide
         side = OrderSide.BUY if direction == "LONG" else OrderSide.SELL
 
         return {
@@ -234,7 +453,7 @@ class DydxExecutor:
         self, decision: dict, params: dict, portfolio: dict
     ) -> dict:
         """Place a short-term market order for entry."""
-        from dydxv4.clients.constants import OrderType, OrderSide, OrderTimeInForce
+        from dydx4.clients.helpers.chain_helpers import OrderType, OrderSide, Order_TimeInForce
 
         record_base = {
             "timestamp": _ts(),
@@ -262,33 +481,42 @@ class DydxExecutor:
 
             client_id = random.randint(0, MAX_CLIENT_ID)
 
-            tx = await self.dydx.client.place_short_term_order(
+            order_side = OrderSide.BUY if params["direction"] == "LONG" else OrderSide.SELL
+            # Add 0.5% slippage tolerance for IOC orders
+            if order_side == OrderSide.BUY:
+                limit_price = round(params["market_price"] * 1.005)  # willing to pay up to 0.5% above
+            else:
+                limit_price = round(params["market_price"] * 0.995)  # willing to sell down to 0.5% below
+            tx = self.dydx.client.place_short_term_order(
                 subaccount,
                 market=self.cfg.get("market", "BTC-USD"),
-                side=params["side"],
-                price=0,  # market order — price 0 with IOC
+                side=order_side,
+                type=OrderType.MARKET,
+                price=limit_price,
                 size=params["size_btc"],
                 client_id=client_id,
                 good_til_block=good_til_block,
-                time_in_force=OrderTimeInForce.IOC,
+                time_in_force=Order_TimeInForce.TIME_IN_FORCE_IOC,
                 reduce_only=False,
             )
-            log.info("Entry order TX submitted: %s", tx)
+            log.info("Entry order TX submitted (price=%s, slippage limit=%s): %s",
+                     params["market_price"], limit_price, tx)
 
         except Exception as e:
             # Retry once on sequence mismatch
             if "sequence" in str(e).lower():
                 log.warning("Wallet sequence mismatch, retrying: %s", e)
                 try:
-                    tx = await self.dydx.client.place_short_term_order(
+                    tx = self.dydx.client.place_short_term_order(
                         subaccount,
                         market=self.cfg.get("market", "BTC-USD"),
-                        side=params["side"],
-                        price=0,
+                        side=order_side,
+                        type=OrderType.MARKET,
+                        price=limit_price,
                         size=params["size_btc"],
                         client_id=random.randint(0, MAX_CLIENT_ID),
                         good_til_block=good_til_block,
-                        time_in_force=OrderTimeInForce.IOC,
+                        time_in_force=Order_TimeInForce.TIME_IN_FORCE_IOC,
                         reduce_only=False,
                     )
                 except Exception as retry_err:
@@ -306,7 +534,7 @@ class DydxExecutor:
         record_base["client_id"] = client_id
         fill = await self._wait_for_fill(client_id)
         if fill:
-            record_base["fill_price"] = fill.get("price", params["market_price"])
+            record_base["fill_price"] = float(fill.get("price", params["market_price"]))
             record_base["fee_usd"] = float(fill.get("fee", 0))
             record_base["status"] = "FILLED"
         else:
@@ -325,19 +553,32 @@ class DydxExecutor:
             await asyncio.sleep(poll_interval_s)
             try:
                 address = self.dydx.subaccount.address
-                fills_resp = await self.dydx.client.indexer_client.account.get_subaccount_fills(
+                fills_raw = self.dydx.client.indexer_client.account.get_subaccount_fills(
                     address, self.dydx.subaccount_number, limit=10
                 )
+                fills_resp = self.dydx._unwrap(fills_raw)
                 fills = fills_resp.get("fills", [])
                 # Try to match by clientId if available, else take most recent
                 for fill in fills:
                     if fill.get("clientId") == str(client_id):
                         log.info("Fill confirmed (matched clientId) on attempt %d", attempt + 1)
                         return fill
-                # Fallback: return most recent fill if it's fresh (within last 60s)
+                # Fallback: return most recent fill only if it's fresh (within last 120s)
                 if fills:
-                    log.info("Fill found (most recent, no clientId match) on attempt %d", attempt + 1)
-                    return fills[0]
+                    from datetime import datetime, timezone
+                    fill_ts = fills[0].get("createdAt", "")
+                    if fill_ts:
+                        try:
+                            fill_time = datetime.fromisoformat(fill_ts.replace("Z", "+00:00"))
+                            age_s = (datetime.now(timezone.utc) - fill_time).total_seconds()
+                            if age_s < 120:
+                                log.info("Fill found (recent fill %.0fs old, no clientId match) on attempt %d",
+                                         age_s, attempt + 1)
+                                return fills[0]
+                            else:
+                                log.debug("Most recent fill is %.0fs old — too stale, continuing poll", age_s)
+                        except (ValueError, TypeError):
+                            pass
             except Exception as e:
                 log.warning("Fill poll attempt %d failed: %s", attempt + 1, e)
         return None
@@ -350,12 +591,28 @@ class DydxExecutor:
         If the critical SL order fails, attempt to close the position
         via a market order to avoid an unprotected position.
         """
-        from dydxv4.clients.constants import OrderSide, OrderTimeInForce, OrderType
+        from dydx4.clients.helpers.chain_helpers import OrderType, OrderSide, OrderTimeInForce, OrderExecution
 
         # Closing side is opposite of entry
         close_side = OrderSide.SELL if params["direction"] == "LONG" else OrderSide.BUY
         tp_ok = False
         sl_ok = False
+
+        # Use actual position size (may differ from ordered size on testnet)
+        order_size = params["size_btc"]
+        try:
+            portfolio = await self.dydx.get_portfolio_state()
+            market = self.cfg.get("market", "BTC-USD")
+            for pos in portfolio.get("positions", []):
+                if pos["market"] == market:
+                    actual = float(pos["size"])
+                    if actual > 0 and actual != order_size:
+                        log.info("TP/SL using actual position size %.4f (ordered %.3f)",
+                                 actual, order_size)
+                        order_size = actual
+                    break
+        except Exception as e:
+            log.warning("Could not fetch actual position size: %s — using ordered size", e)
 
         # Expiry: trade duration + 1 hour buffer, clamped to [1h, 24h]
         duration_min = decision.get("duration_minutes", 60)
@@ -365,20 +622,24 @@ class DydxExecutor:
         tp_price = params["take_profit"]
         if tp_price > 0:
             try:
-                await self.dydx.client.place_order(
+                from dydx4.clients.helpers.chain_helpers import OrderExecution
+                self.dydx.client.place_order(
                     self.dydx.subaccount,
                     market=self.cfg.get("market", "BTC-USD"),
-                    type=OrderType.TAKE_PROFIT,
+                    type=OrderType.TAKE_PROFIT_MARKET,
                     side=close_side,
                     price=tp_price,
-                    trigger_price=tp_price,
-                    size=params["size_btc"],
+                    size=order_size,
                     client_id=random.randint(0, MAX_CLIENT_ID),
                     time_in_force=OrderTimeInForce.GTT,
+                    good_til_block=0,
                     good_til_time_in_seconds=gtt_seconds,
+                    execution=OrderExecution.IOC,
+                    post_only=False,
                     reduce_only=True,
+                    trigger_price=tp_price,
                 )
-                log.info("TP order placed at $%,.2f", tp_price)
+                log.info("TP order placed at $%.2f", tp_price)
                 tp_ok = True
             except Exception as e:
                 log.error("TP order failed: %s", e)
@@ -394,20 +655,29 @@ class DydxExecutor:
         sl_price = params["stop_loss"]
         if sl_price > 0:
             try:
-                await self.dydx.client.place_order(
+                from dydx4.clients.helpers.chain_helpers import OrderExecution
+                # Add 1% slippage tolerance so SL fills even in fast drops
+                if close_side == OrderSide.SELL:
+                    sl_limit = round(sl_price * 0.99)  # accept up to 1% worse
+                else:
+                    sl_limit = round(sl_price * 1.01)
+                self.dydx.client.place_order(
                     self.dydx.subaccount,
                     market=self.cfg.get("market", "BTC-USD"),
-                    type=OrderType.STOP_LIMIT,
+                    type=OrderType.STOP_MARKET,
                     side=close_side,
-                    price=sl_price,
-                    trigger_price=sl_price,
-                    size=params["size_btc"],
+                    price=sl_limit,
+                    size=order_size,
                     client_id=random.randint(0, MAX_CLIENT_ID),
                     time_in_force=OrderTimeInForce.GTT,
+                    good_til_block=0,
                     good_til_time_in_seconds=gtt_seconds,
+                    execution=OrderExecution.IOC,
+                    post_only=False,
                     reduce_only=True,
+                    trigger_price=sl_price,
                 )
-                log.info("SL order placed at $%,.2f", sl_price)
+                log.info("SL order placed: trigger=$%.2f limit=$%.2f", sl_price, sl_limit)
                 sl_ok = True
             except Exception as e:
                 log.error("SL order failed — position is UNPROTECTED: %s", e)
@@ -430,28 +700,48 @@ class DydxExecutor:
     # ------------------------------------------------------------------
 
     async def _emergency_close(self, params: dict, close_side):
-        """Attempt to close a position via market order when SL placement fails."""
-        from dydxv4.clients.constants import OrderTimeInForce
+        """Attempt to close a position via market order when SL placement fails.
+
+        Fetches the actual position size from the chain to avoid
+        reduce-only size mismatch errors (e.g. on testnet partial fills).
+        """
+        from dydx4.clients.helpers.chain_helpers import OrderType, Order_TimeInForce
 
         try:
+            # Get actual position size to avoid reduce-only mismatch
+            portfolio = await self.dydx.get_portfolio_state()
+            positions = portfolio.get("positions", [])
+            market = self.cfg.get("market", "BTC-USD")
+            actual_size = params["size_btc"]
+            for pos in positions:
+                if pos["market"] == market:
+                    actual_size = float(pos["size"])
+                    break
+
+            if actual_size <= 0:
+                log.info("Emergency close: no open position found — skipping")
+                return
+
+            price = await self.dydx.get_current_price()
             block_height = await self.dydx.get_latest_block_height()
             good_til_block = block_height + self.cfg.get("short_term_block_offset", 10)
-            await self.dydx.client.place_short_term_order(
+            self.dydx.client.place_short_term_order(
                 self.dydx.subaccount,
-                market=self.cfg.get("market", "BTC-USD"),
+                market=market,
                 side=close_side,
-                price=0,
-                size=params["size_btc"],
+                type=OrderType.MARKET,
+                price=price,
+                size=actual_size,
                 client_id=random.randint(0, MAX_CLIENT_ID),
                 good_til_block=good_til_block,
-                time_in_force=OrderTimeInForce.IOC,
+                time_in_force=Order_TimeInForce.TIME_IN_FORCE_IOC,
                 reduce_only=True,
             )
-            log.info("Emergency close order submitted for %.3f BTC", params["size_btc"])
+            log.info("Emergency close order submitted for %.4f BTC", actual_size)
             self._append_jsonl("trades.jsonl", {
                 "timestamp": _ts(),
                 "action": "EMERGENCY_CLOSE",
-                "size_btc": params["size_btc"],
+                "size_btc": actual_size,
                 "mode": "live",
                 "status": "SUBMITTED",
             })

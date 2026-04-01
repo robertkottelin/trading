@@ -9,6 +9,8 @@ Usage:
     bnc_features = compute_ta_features(bnc_df, prefix="bnc_")
 """
 
+import warnings
+
 import numpy as np
 import pandas as pd
 import ta
@@ -28,7 +30,8 @@ def compute_ta_features(df: pd.DataFrame, prefix: str = "") -> pd.DataFrame:
     Returns:
         DataFrame with open_time_ms + prefixed feature columns. Same row count as input.
     """
-    # Work on a copy
+    # Work on a copy — suppress fragmentation warnings since we defragment at output
+    warnings.filterwarnings("ignore", message="DataFrame is highly fragmented", category=pd.errors.PerformanceWarning)
     d = df.copy()
 
     # Ensure required columns exist
@@ -78,6 +81,9 @@ def compute_ta_features(df: pd.DataFrame, prefix: str = "") -> pd.DataFrame:
                 d[c] = d[c].replace([np.inf, -np.inf], np.nan)
     except Exception as e:
         log.warning("  [TA] TA library failed: %s — continuing without", e)
+
+    # Defragment after ta.add_all_ta_features() which does many inserts
+    d = d.copy()
 
     # --- Step 3: CVD features (only with real taker data) ---
     if _has_real_taker_data:
@@ -250,8 +256,9 @@ def compute_ta_features(df: pd.DataFrame, prefix: str = "") -> pd.DataFrame:
     d["vol_scaling_ratio"] = d["realized_vol_48"] / (d["realized_vol_12"] + 1e-10)
 
     # --- Step 7: Cross-timeframe features ---
-    for col, agg in [("close", "last"), ("high", "max"), ("low", "min"), ("volume", "sum")]:
+    for col, agg in [("high", "max"), ("low", "min"), ("volume", "sum")]:
         d[f"tf15m_{col}_{agg}"] = d[col].rolling(3, min_periods=1).agg(agg)
+    d["tf15m_close_last"] = d["close"]  # last value in a rolling window == current value
 
     d["tf1h_return"] = close.pct_change(12)
     d["tf1h_range"] = (high.rolling(12, min_periods=1).max() - low.rolling(12, min_periods=1).min()) / close
@@ -428,10 +435,13 @@ def compute_ta_features(df: pd.DataFrame, prefix: str = "") -> pd.DataFrame:
                  "usd_volume", "starting_oi", "orderbook_mid_open", "orderbook_mid_close"}
     feature_cols = sorted(c for c in d.columns if c not in drop_cols)
 
-    result = d[["open_time_ms"]].copy()
-    for c in feature_cols:
-        out_name = f"{prefix}{c}" if prefix else c
-        result[out_name] = d[c].values
+    # Build all feature columns at once via pd.concat to avoid DataFrame
+    # fragmentation from repeated single-column assignment.
+    renamed = {(f"{prefix}{c}" if prefix else c): d[c].values for c in feature_cols}
+    result = pd.concat(
+        [d[["open_time_ms"]], pd.DataFrame(renamed, index=d.index)],
+        axis=1,
+    )
 
     log.info("  [TA] %d features computed%s", len(feature_cols),
              f" (prefix={prefix})" if prefix else "")

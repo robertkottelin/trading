@@ -28,17 +28,21 @@ class OkxDownloader(BaseDownloader):
 
     # ---- Funding Rates ----------------------------------------------------
 
-    def _download_funding(self):
+    def _download_funding(self, since_ms=None):
         """Download historical funding rates.
 
         OKX returns newest-first.  The ``after`` parameter means
         "return records with fundingTime earlier than this value",
         which lets us paginate backward through history.
+
+        If *since_ms* is provided, stop paginating once records older
+        than that timestamp are reached (used for incremental downloads).
         """
         self.log.info("  Downloading OKX funding rates...")
 
         all_rows = []
         after = ""  # pagination cursor (fundingTime ms string)
+        reached_since = False
 
         while True:
             params = {"instId": self.inst_id, "limit": "100"}
@@ -58,12 +62,18 @@ class OkxDownloader(BaseDownloader):
 
             for d in data:
                 ts = int(d.get("fundingTime", 0))
+                if since_ms is not None and ts <= since_ms:
+                    reached_since = True
+                    continue
                 all_rows.append({
                     "funding_time_ms": ts,
                     "timestamp": self._ms_to_str(ts) + " UTC",
                     "funding_rate": float(d.get("fundingRate", 0)),
                     "realized_rate": float(d.get("realizedRate", 0) or 0),
                 })
+
+            if reached_since:
+                break
 
             # Use the oldest entry's fundingTime as cursor for next page
             after = data[-1].get("fundingTime", "")
@@ -195,9 +205,12 @@ class OkxDownloader(BaseDownloader):
         self._download_liquidations()
 
     def download_incremental(self):
-        # Funding always re-fetches (API returns newest-first, limited depth)
+        # Funding: only fetch records newer than last saved timestamp
+        last_funding_ms = self._get_last_timestamp_ms(
+            "okx_funding_rates.csv", ts_col="funding_time_ms"
+        )
+        self._download_funding(since_ms=last_funding_ms)
         # Snapshots always append (point-in-time data)
-        self._download_funding()
         self._download_open_interest()
         self._download_taker_volume()
         self._download_liquidations()

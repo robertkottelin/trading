@@ -16,7 +16,7 @@ Phases:
   0: Feature selection (per-target top-100, reuse v22 borrowed params)
   1: Optuna for up_6_001 (new target)
   2: Train all models (10-split WF)
-  3: Quality scoring (recent-weighted)
+  3: Quality scoring (equal-weighted)
   4: DD config sweep
   5: Final production config
 
@@ -55,9 +55,11 @@ FEE_RT = 0.0010  # 10 bps round-trip (taker fee + slippage + funding drag)
 SLIPPAGE_BPS = 3  # additional per-side slippage in basis points
 N_SPLITS = 10
 
-# Load v22 Optuna params
-V22_OPTUNA_FILE = os.path.join("models", "v22", "optuna_params_v22.json")
-with open(V22_OPTUNA_FILE, "r") as _f:
+# Load prior Optuna params (v23 on retrain, falls back to v22 for first run)
+_OPTUNA_FILE = os.path.join("models", "v23", "optuna_params_v23.json")
+if not os.path.exists(_OPTUNA_FILE):
+    _OPTUNA_FILE = os.path.join("models", "v22", "optuna_params_v22.json")
+with open(_OPTUNA_FILE, "r") as _f:
     V22_OPTUNA_PARAMS = json.load(_f)
 
 # V15 OPTIMIZED PARAMS (proven stable v15-v22, for targets already optimized)
@@ -391,17 +393,17 @@ def portfolio_backtest(model_trades_list, max_dd_pct=None, cooldown=20,
         breaker = False
         skip_count = 0
         for t in merged:
+            t_copy = dict(t)
+            t_copy["net_ret"] = t["net_ret"] * position_scale * t["model_weight"]
+            # Always track equity (even during cooldown) so cum/peak stay current
+            cum *= (1 + t_copy["net_ret"])
+            peak = max(peak, cum)
             if breaker:
                 skip_count += 1
                 if skip_count >= cooldown:
                     breaker = False
-                    # Don't reset cum/peak — continue tracking actual equity
                 continue
-            t_copy = dict(t)
-            t_copy["net_ret"] = t["net_ret"] * position_scale * t["model_weight"]
             filtered.append(t_copy)
-            cum *= (1 + t_copy["net_ret"])
-            peak = max(peak, cum)
             dd = (cum - peak) / peak
             if dd < -max_dd_pct:
                 breaker = True
@@ -853,7 +855,7 @@ def main():
         # PHASE 3: QUALITY SCORING
         # =====================================================================
         log(f"\n{'#'*80}", f)
-        log(f"  PHASE 3: QUALITY SCORING (recent-weighted)", f)
+        log(f"  PHASE 3: QUALITY SCORING (equal-weighted)", f)
         log(f"{'#'*80}\n", f)
 
         def compute_quality(name):
@@ -864,7 +866,7 @@ def main():
                     r = all_results[name][s]
                     if r["trades"]:
                         net = np.prod([1 + t["net_ret"] for t in r["trades"]]) - 1
-                        weight = 2.0 if s <= 2 else 1.0
+                        weight = 1.0
                         nets.append((net, weight))
                         # Daily-return-based Sharpe
                         t_idxs = np.array([t["idx"] for t in r["trades"]])
@@ -890,7 +892,7 @@ def main():
         mean_q = np.mean(list(quality.values()))
         weights = {k: v / mean_q for k, v in quality.items()}
 
-        log(f"  Model quality weights (recent-weighted, mean=1.0):", f)
+        log(f"  Model quality weights (equal-weighted, mean=1.0):", f)
         for name in sorted(selected):
             opt_tag = ""
             for key in optimized_params:
@@ -1000,6 +1002,21 @@ def main():
                     best_cfg = cfg_label
                     best_params = data["params"]
 
+        # Final fallback: relax pos threshold entirely — pick best sharpe from any config
+        if best_cfg is None:
+            best_sharpe = -float("inf")
+            for cfg_label, data in all_cfg_results.items():
+                if data["sharpe"] > best_sharpe:
+                    best_sharpe = data["sharpe"]
+                    best_cfg = cfg_label
+                    best_params = data["params"]
+            if best_cfg is not None:
+                log(f"  WARNING: No config met pos>=10 threshold — "
+                    f"using best available: {best_cfg} (sharpe={best_sharpe:.1f})", f)
+
+        if best_cfg is None:
+            raise RuntimeError("No valid production config found — all_cfg_results is empty")
+
         cfg_data = all_cfg_results[best_cfg]
         max_dd, cooldown, max_conc, pos_scale = best_params
 
@@ -1011,7 +1028,7 @@ def main():
         log(f"  Max concurrent: {max_conc}", f)
         log(f"  Position scale: {pos_scale}", f)
         log(f"  Models: {len(selected)}", f)
-        log(f"  Quality weighting: YES (recent-weighted)", f)
+        log(f"  Quality weighting: YES (equal-weighted)", f)
 
         # Identify safest and balanced configs
         safest_dd = 0
@@ -1064,6 +1081,24 @@ def main():
         log(f"  Worst max drawdown: {cfg_data['worst_dd']:.2%}", f)
         log(f"  Avg Sharpe: {cfg_data['sharpe']:.2f}", f)
         log(f"  Min Sharpe: {min(all_sharpes):.1f}" if all_sharpes else "  Min Sharpe: N/A", f)
+
+        # --- Backtest sanity warnings ---
+        warnings_fired = []
+        if cfg_data['sharpe'] > 3.0:
+            warnings_fired.append(f"Sharpe {cfg_data['sharpe']:.1f} > 3.0 — likely unrealistic")
+        if annual > 2.0:
+            warnings_fired.append(f"Annualized return {annual:+.0%} > 200% — likely unrealistic")
+        if abs(cfg_data['worst_dd']) < 0.01 and annual > 0.5:
+            warnings_fired.append(f"Near-zero DD ({cfg_data['worst_dd']:.2%}) with high return — suspicious")
+        if all_sharpes and min(all_sharpes) > 5.0:
+            warnings_fired.append(f"Min Sharpe {min(all_sharpes):.1f} > 5.0 — all splits unrealistically good")
+        if warnings_fired:
+            log(f"\n  *** SANITY WARNINGS ({len(warnings_fired)}) ***", f)
+            for w in warnings_fired:
+                log(f"  WARNING: {w}", f)
+            log(f"  Check for data leakage, lookahead bias, or overfitting.", f)
+        else:
+            log(f"\n  Sanity check: all metrics within realistic bounds.", f)
 
         log(f"\n  === COMPARISON vs V22 ===", f)
         log(f"  V22: 10/10 pos, avg +88642.8%, worstDD -13.7%, Sharpe 40.1, annual +51307%, minSharpe 32.1", f)
@@ -1130,7 +1165,7 @@ def main():
             "config_name": best_cfg, "dd_limit": max_dd,
             "cooldown": cooldown, "max_concurrent": max_conc,
             "position_scale": pos_scale, "fee_rt": FEE_RT,
-            "quality_weighting": True, "recent_weighted": True,
+            "quality_weighting": True, "recent_weighted": False,
             "v23_optimized_targets": list(optimized_params.keys()),
             "v22_optimized_targets": list(V22_OPTUNA_PARAMS.keys()),
             "model_weights": {k: float(v) for k, v in weights.items()

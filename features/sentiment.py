@@ -14,8 +14,11 @@ def build_sentiment_features(grid: pd.DataFrame) -> pd.DataFrame:
 
     # --- Fear & Greed Index (daily) ---
     fng = load_csv("sentiment_fear_greed.csv")
+    # lag_days=1: FNG is a daily aggregate published once per day (around
+    # midnight UTC).  Using lag_days=0 on intraday candles would leak
+    # up to ~24h of future information.
     fng_aligned = align_daily(fng, gms, "date",
-                              ["fng_value"], "sent_", lag_days=0)
+                              ["fng_value"], "sent_", lag_days=1)
 
     result["sent_fng_value"] = fng_aligned["sent_fng_value"]
 
@@ -42,14 +45,19 @@ def build_sentiment_features(grid: pd.DataFrame) -> pd.DataFrame:
     ).astype(np.float32)
 
     # --- Google Trends (daily/weekly) ---
-    trends = load_csv("sentiment_google_trends.csv")
-    trends_aligned = align_daily(trends, gms, "date",
-                                 ["bitcoin"], "sent_", lag_days=0)
+    try:
+        trends = load_csv("sentiment_google_trends.csv")
+        # lag_days=1: Google Trends data is a weekly/daily aggregate,
+        # not available in real-time intraday.
+        trends_aligned = align_daily(trends, gms, "date",
+                                     ["bitcoin"], "sent_", lag_days=1)
 
-    result["sent_gtrends_bitcoin"] = trends_aligned["sent_bitcoin"]
-    result["sent_gtrends_momentum_7d"] = (
-        result["sent_gtrends_bitcoin"].diff(7 * 288).astype(np.float32)
-    )
+        result["sent_gtrends_bitcoin"] = trends_aligned["sent_bitcoin"]
+        result["sent_gtrends_momentum_7d"] = (
+            result["sent_gtrends_bitcoin"].diff(7 * 288).astype(np.float32)
+        )
+    except (FileNotFoundError, KeyError):
+        pass
 
     # --- Market data (daily, ~366 rows) ---
     try:
@@ -57,8 +65,10 @@ def build_sentiment_features(grid: pd.DataFrame) -> pd.DataFrame:
         mkt_cols = [c for c in ["btc_dominance", "total_market_cap", "btc_market_cap"]
                     if c in mkt.columns]
         if mkt_cols:
+            # lag_days=1: CoinGecko daily market data (dominance, mcap)
+            # is an end-of-day aggregate, not available intraday.
             m = align_daily(mkt, gms, "date", mkt_cols,
-                            "sent_", lag_days=0)
+                            "sent_", lag_days=1)
             if "sent_btc_dominance" in m.columns:
                 result["sent_btc_dominance"] = m["sent_btc_dominance"]
                 result["sent_btc_dominance_change_7d"] = (
@@ -67,7 +77,7 @@ def build_sentiment_features(grid: pd.DataFrame) -> pd.DataFrame:
             if "sent_total_market_cap" in m.columns:
                 result["sent_total_mcap"] = m["sent_total_market_cap"]
                 result["sent_total_mcap_change_7d"] = (
-                    result["sent_total_mcap"].pct_change(7 * 288).astype(np.float32)
+                    result["sent_total_mcap"].pct_change(7 * 288, fill_method=None).astype(np.float32)
                 )
     except (FileNotFoundError, KeyError):
         pass

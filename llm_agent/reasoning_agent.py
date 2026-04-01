@@ -22,6 +22,7 @@ from dotenv import load_dotenv
 
 from llm_agent import signal_generator, context_builder, portfolio_reader
 from llm_agent import decision_manager, grok_client, trade_history
+from strategies.engine import StrategyEngine
 
 log = logging.getLogger("llm_agent")
 
@@ -33,9 +34,12 @@ def setup_logging(verbose: bool = False):
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+    # Suppress noisy dydx4 SDK warnings (Python 3 .decode() compat bug)
+    logging.getLogger("dydx4").setLevel(logging.ERROR)
+    logging.getLogger("graphviz").setLevel(logging.WARNING)
 
 
-def build_prompt(signals_text: str, context_text: str,
+def build_prompt(signals_text: str, strategies_text: str, context_text: str,
                  portfolio_text: str, history_text: str,
                  trade_history_text: str) -> str:
     """Compose the full prompt from all sections."""
@@ -44,6 +48,8 @@ def build_prompt(signals_text: str, context_text: str,
         f"CURRENT TIME: {now}",
         "",
         signals_text,
+        "",
+        strategies_text,
         "",
         context_text,
         "",
@@ -65,31 +71,50 @@ def run(args):
     """Main execution flow."""
     load_dotenv()
 
-    # --- Stage 0: Orphan order cleanup (live mode only) ---
+    # --- Stage 0: Orphan cleanup + position monitoring (live mode only) ---
     exec_cfg = yaml.safe_load(
         open("config/settings.yaml")
     ).get("execution", {})
+
+    # CLI overrides for network and mode
+    if hasattr(args, "testnet"):
+        network = "testnet" if args.testnet else "mainnet"
+        exec_cfg["network"] = network
+    if hasattr(args, "live"):
+        exec_cfg["mode"] = "live" if args.live else "paper"
+
+    network = exec_cfg.get("network", "testnet")
     mode = exec_cfg.get("mode", "paper")
+    log.info("Config override — network: %s, mode: %s", network, mode)
     if mode == "live" and not args.no_execute:
-        log.info("Stage 0/7: Checking for orphan orders...")
+        log.info("Stage 0/7: Orphan cleanup + position monitoring...")
         try:
             from execution.dydx_client import DydxClient
             from execution.dydx_executor import DydxExecutor
 
-            async def _cleanup():
-                client = DydxClient()
+            async def _startup_checks():
+                client = DydxClient(config=exec_cfg)
                 await client.connect()
                 try:
                     executor = DydxExecutor(client, config=exec_cfg)
-                    return await executor.cleanup_orphan_orders()
+                    cleaned = await executor.cleanup_orphan_orders()
+                    monitor = await executor.verify_position_orders()
+                    return cleaned, monitor
                 finally:
                     await client.disconnect()
 
-            cleaned = asyncio.run(_cleanup())
+            cleaned, monitor = asyncio.run(_startup_checks())
             if cleaned > 0:
                 log.warning("Cleaned up %d orphan order(s)", cleaned)
+            if monitor["unprotected"]:
+                for p in monitor["unprotected"]:
+                    log.warning(
+                        "UNPROTECTED position: %s %s %s — missing %s",
+                        p["side"], p["size"], p["market"],
+                        "+".join(p["missing"]),
+                    )
         except Exception as e:
-            log.warning("Orphan cleanup failed (non-fatal): %s", e)
+            log.warning("Startup checks failed (non-fatal): %s", e)
 
     # --- Stage 1: ML signals ---
     signals_result = None
@@ -108,6 +133,20 @@ def run(args):
             log.warning("Signal generation failed: %s", e)
             signals_text = f"ML MODEL SIGNALS: Error — {e}"
 
+    # --- Stage 1.5: Conventional strategy signals ---
+    log.info("Stage 1.5/7: Generating conventional strategy signals...")
+    try:
+        strategy_engine = StrategyEngine(data_dir="raw_data")
+        strategy_result = strategy_engine.generate_signals()
+        strategies_text = strategy_result["text_summary"]
+        log.info("Strategy signals: %d long, %d short, %d inactive",
+                 strategy_result["consensus"].get("long_count", 0),
+                 strategy_result["consensus"].get("short_count", 0),
+                 strategy_result["consensus"].get("inactive_count", 0))
+    except Exception as e:
+        log.warning("Strategy signal generation failed: %s", e)
+        strategies_text = "CONVENTIONAL STRATEGY SIGNALS: Error — " + str(e)
+
     # --- Stage 2: Market context ---
     log.info("Stage 2/7: Building market context...")
     try:
@@ -120,7 +159,7 @@ def run(args):
     # --- Stage 3: Portfolio state ---
     log.info("Stage 3/7: Reading portfolio state...")
     try:
-        portfolio_text = portfolio_reader.get_portfolio()
+        portfolio_text = portfolio_reader.get_portfolio(network=network)
         log.info("Portfolio state retrieved")
     except Exception as e:
         log.warning("Portfolio reader failed: %s", e)
@@ -152,8 +191,8 @@ def run(args):
         trade_history_text = "TRADE HISTORY: Unavailable"
 
     # --- Compose prompt ---
-    prompt = build_prompt(signals_text, context_text, portfolio_text,
-                          history_text, trade_history_text)
+    prompt = build_prompt(signals_text, strategies_text, context_text,
+                          portfolio_text, history_text, trade_history_text)
 
     if args.dry_run:
         print("\n" + "=" * 80)
@@ -194,20 +233,16 @@ def run(args):
     if not args.no_execute:
         log.info("Stage 7/7: Executing trade...")
         try:
-            exec_cfg = yaml.safe_load(
-                open("config/settings.yaml")
-            ).get("execution", {})
-            mode = exec_cfg.get("mode", "paper")
             if mode == "paper":
                 from execution.paper_executor import PaperExecutor
-                trade = PaperExecutor().execute_decision(decision)
+                trade = PaperExecutor(config={"execution": exec_cfg}).execute_decision(decision)
             else:
                 from execution.dydx_client import DydxClient
                 from execution.dydx_executor import DydxExecutor
                 from execution.risk_manager import RiskManager
 
                 async def _live_execute():
-                    client = DydxClient()
+                    client = DydxClient(config=exec_cfg)
                     await client.connect()
                     try:
                         executor = DydxExecutor(client, RiskManager(exec_cfg))
@@ -287,7 +322,11 @@ def _print_summary(decision: dict):
         print(f"  Take Profit:${decision.get('take_profit', 0):,.2f}")
         print(f"  Stop Loss:  ${decision.get('stop_loss', 0):,.2f}")
         print(f"  Duration:   {decision.get('duration_minutes', 0)} min")
-        print(f"  Size:       {decision.get('position_size_pct', 0):.1%} of equity")
+        size_usd = decision.get("position_size_usd")
+        if size_usd is not None:
+            print(f"  Size:       ${size_usd:.0f} USD notional")
+        else:
+            print(f"  Size:       {decision.get('position_size_pct', 0):.1%} of equity (legacy)")
 
         # Risk:reward
         entry = decision.get("entry_price", 0)
@@ -329,6 +368,15 @@ def main():
                         help="Disable Grok web_search and x_search tools")
     parser.add_argument("--no-execute", action="store_true",
                         help="Skip trade execution (Stage 7)")
+    parser.add_argument("--testnet", action="store_true", default=True,
+                        help="Use dYdX testnet (default)")
+    parser.add_argument("--no-testnet", dest="testnet", action="store_false",
+                        help="Use dYdX mainnet")
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument("--live", action="store_true", default=True,
+                            help="Execute trades on-chain (default)")
+    mode_group.add_argument("--paper", dest="live", action="store_false",
+                            help="Paper trading mode")
     parser.add_argument("--verbose", "-v", action="store_true",
                         help="Enable debug logging")
     args = parser.parse_args()

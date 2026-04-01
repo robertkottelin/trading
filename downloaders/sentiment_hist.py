@@ -172,58 +172,13 @@ class SentimentDownloader(BaseDownloader):
         self.download_all()
 
     def download_recent(self, hours=24):
-        """Download recent sentiment data — last 7 days."""
-        # FNG: last 7 days
-        self.log.info("  Downloading recent Fear & Greed (7d)...")
+        """Download sentiment data — full history (daily data, cheap single API calls)."""
+        self._download_fear_greed()
+        self._download_coingecko_market()
         try:
-            resp = self._http_get(self.fng_url, {"limit": 7, "format": "json"})
-            body = resp.json()
-            data = body.get("data", [])
-            if data:
-                rows = []
-                for d in data:
-                    ts = int(d.get("timestamp", 0))
-                    rows.append({
-                        "date": datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d"),
-                        "fng_value": int(d.get("value", 0)),
-                        "fng_classification": d.get("value_classification", ""),
-                    })
-                df = pd.DataFrame(rows)
-                self._save_csv(df, "sentiment_fear_greed.csv", "Fear & Greed Index",
-                               sort_by="date", dedup_col="date")
+            self._download_google_trends()
         except Exception as e:
-            self.log.error("  Recent FNG failed: %s", e)
-
-        # CoinGecko: 7 days
-        self.log.info("  Downloading recent CoinGecko (7d)...")
-        cg_params = {"vs_currency": "usd", "days": "7", "interval": "daily"}
-        if self.cg_demo_key:
-            cg_params["x_cg_demo_api_key"] = self.cg_demo_key
-        try:
-            url = f"{self.cg_base}/coins/bitcoin/market_chart"
-            resp = self._http_get(url, cg_params)
-            btc_data = resp.json()
-            prices = btc_data.get("prices", [])
-            mcaps = btc_data.get("market_caps", [])
-            volumes = btc_data.get("total_volumes", [])
-            rows = []
-            for i, p in enumerate(prices):
-                ts_ms = p[0]
-                date = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
-                rows.append({
-                    "date": date,
-                    "btc_price": p[1],
-                    "btc_market_cap": mcaps[i][1] if i < len(mcaps) else None,
-                    "btc_volume_usd": volumes[i][1] if i < len(volumes) else None,
-                })
-            if rows:
-                df = pd.DataFrame(rows)
-                self._save_csv(df, "sentiment_market.csv", "CoinGecko market data",
-                               sort_by="date", dedup_col="date")
-        except Exception as e:
-            self.log.error("  Recent CoinGecko failed: %s", e)
-
-        # Skip Google Trends for recent — slow and not useful for 24h context
+            self.log.warning("  Google Trends skipped in recent mode: %s", e)
 
 
 if __name__ == "__main__":

@@ -10,21 +10,27 @@ import requests
 
 log = logging.getLogger(__name__)
 
-BASE_URL = "https://indexer.dydx.trade/v4"
+MAINNET_URL = "https://indexer.dydx.trade/v4"
+TESTNET_URL = "https://indexer.v4testnet.dydx.exchange/v4"
 TIMEOUT = 15  # seconds
 
 
-def _get_address() -> str:
-    """Get the dYdX address from environment."""
-    addr = os.environ.get("ADDRESS", "")
+def _get_address(network: str = "testnet") -> str:
+    """Get the dYdX address from environment based on network."""
+    env_var = "TEST_ADDRESS" if network == "testnet" else "ADDRESS"
+    addr = os.environ.get(env_var, "")
     if not addr:
-        raise ValueError("ADDRESS not set in environment / .env")
+        # Fallback: try the other var
+        fallback = "ADDRESS" if network == "testnet" else "TEST_ADDRESS"
+        addr = os.environ.get(fallback, "")
+    if not addr:
+        raise ValueError(f"{env_var} not set in environment / .env")
     return addr
 
 
-def _api_get(endpoint: str) -> dict | None:
+def _api_get(endpoint: str, base_url: str = MAINNET_URL) -> dict | None:
     """Make a GET request to the dYdX Indexer API."""
-    url = f"{BASE_URL}{endpoint}"
+    url = f"{base_url}{endpoint}"
     try:
         resp = requests.get(url, timeout=TIMEOUT)
         resp.raise_for_status()
@@ -34,17 +40,21 @@ def _api_get(endpoint: str) -> dict | None:
         return None
 
 
-def get_portfolio() -> str:
+def get_portfolio(network: str = "testnet") -> str:
     """Fetch portfolio state and return formatted text for LLM prompt.
+
+    Args:
+        network: "testnet" or "mainnet" — selects Indexer URL and address env var.
 
     Returns:
         Multi-line text summary of portfolio equity, positions, and recent fills.
     """
-    address = _get_address()
-    lines = ["PORTFOLIO STATE (dYdX v4):"]
+    base_url = TESTNET_URL if network == "testnet" else MAINNET_URL
+    address = _get_address(network)
+    lines = [f"PORTFOLIO STATE (dYdX v4 — {network}):"]
 
     # Subaccount info (equity, free collateral)
-    sub = _api_get(f"/addresses/{address}/subaccountNumber/0")
+    sub = _api_get(f"/addresses/{address}/subaccountNumber/0", base_url)
     if sub and "subaccount" in sub:
         acct = sub["subaccount"]
         equity = acct.get("equity")
@@ -65,7 +75,8 @@ def get_portfolio() -> str:
 
     # Open positions
     positions = _api_get(
-        f"/perpetualPositions?address={address}&subaccountNumber=0&status=OPEN"
+        f"/perpetualPositions?address={address}&subaccountNumber=0&status=OPEN",
+        base_url,
     )
     if positions and "positions" in positions:
         pos_list = positions["positions"]
@@ -89,7 +100,8 @@ def get_portfolio() -> str:
 
     # Recent fills
     fills = _api_get(
-        f"/fills?address={address}&subaccountNumber=0&limit=20"
+        f"/fills?address={address}&subaccountNumber=0&limit=20",
+        base_url,
     )
     if fills and "fills" in fills:
         fill_list = fills["fills"]

@@ -102,13 +102,29 @@ def resolve_pending() -> int:
         entry_ts = pd.Timestamp(ts, tz="UTC")
         expiry_ts = entry_ts + pd.Timedelta(minutes=duration_min)
 
+        # Only check candles strictly after entry and up to expiry + 1 candle
+        klines = klines[klines["_ts"] > entry_ts]
+        klines = klines[klines["_ts"] <= expiry_ts + pd.Timedelta(minutes=5)]
+        if klines.empty:
+            continue
+
         outcome = None
         for _, candle in klines.iterrows():
             candle_ts = candle["_ts"]
+            c_high = candle["high"]
+            c_low = candle["low"]
+            c_close = candle["close"]
+
+            # Skip candles with NaN price data — pd.to_numeric(errors="coerce")
+            # produces NaN for bad values, and NaN comparisons always return
+            # False, which would silently miss TP/SL hits.
+            if pd.isna(c_high) or pd.isna(c_low) or pd.isna(c_close):
+                log.debug("Skipping candle at %s with NaN price data", candle_ts)
+                continue
 
             if direction == "LONG":
                 # Check SL first (conservative — SL before TP if both hit in same candle)
-                if candle["low"] <= sl:
+                if c_low <= sl:
                     pnl = (sl - entry_price) / entry_price * 100
                     outcome = {
                         "status": "SL_HIT",
@@ -118,7 +134,7 @@ def resolve_pending() -> int:
                         "resolved_at": candle_ts.isoformat(),
                     }
                     break
-                if candle["high"] >= tp:
+                if c_high >= tp:
                     pnl = (tp - entry_price) / entry_price * 100
                     outcome = {
                         "status": "TP_HIT",
@@ -129,7 +145,7 @@ def resolve_pending() -> int:
                     }
                     break
             elif direction == "SHORT":
-                if candle["high"] >= sl:
+                if c_high >= sl:
                     pnl = (entry_price - sl) / entry_price * 100
                     outcome = {
                         "status": "SL_HIT",
@@ -139,7 +155,7 @@ def resolve_pending() -> int:
                         "resolved_at": candle_ts.isoformat(),
                     }
                     break
-                if candle["low"] <= tp:
+                if c_low <= tp:
                     pnl = (entry_price - tp) / entry_price * 100
                     outcome = {
                         "status": "TP_HIT",
@@ -152,14 +168,13 @@ def resolve_pending() -> int:
 
             # Check expiry
             if candle_ts >= expiry_ts:
-                close = candle["close"]
                 if direction == "LONG":
-                    pnl = (close - entry_price) / entry_price * 100
+                    pnl = (c_close - entry_price) / entry_price * 100
                 else:
-                    pnl = (entry_price - close) / entry_price * 100
+                    pnl = (entry_price - c_close) / entry_price * 100
                 outcome = {
                     "status": "EXPIRED",
-                    "exit_price": close,
+                    "exit_price": c_close,
                     "pnl_pct": round(pnl, 4),
                     "duration_actual_minutes": duration_min,
                     "resolved_at": candle_ts.isoformat(),
@@ -178,8 +193,12 @@ def resolve_pending() -> int:
     return resolved_count
 
 
-def get_recent_summary(n: int = 10) -> str:
-    """Get a formatted summary of the last n decisions for the LLM prompt."""
+def get_recent_summary(n: int = 15) -> str:
+    """Get a formatted summary of the last n decisions for the LLM prompt.
+
+    Includes win-rate trends (last 5 vs last 10), consecutive SL streak detection,
+    and a RISK_LEVEL / RECOMMENDATION block the LLM uses to self-adjust thresholds.
+    """
     history = _load_history()
     if not history:
         return "RECENT DECISIONS: No previous decisions."
@@ -192,6 +211,9 @@ def get_recent_summary(n: int = 10) -> str:
     total_pnl = 0.0
     trades = 0
 
+    # Collect resolved trade statuses in order (oldest first) for trend analysis
+    resolved_in_order: list[str] = []
+
     for i, entry in enumerate(recent, 1):
         ts = entry.get("timestamp", "?")[:16]
         direction = entry.get("direction", "?")
@@ -199,7 +221,7 @@ def get_recent_summary(n: int = 10) -> str:
         status = outcome.get("status", "PENDING")
 
         if direction == "NO_TRADE":
-            lines.append(f"  #{i}: {ts} NO_TRADE (low confidence)")
+            lines.append(f"  #{i}: {ts} NO_TRADE")
             continue
 
         pnl = outcome.get("pnl_pct", 0)
@@ -215,18 +237,74 @@ def get_recent_summary(n: int = 10) -> str:
                 wins += 1
             else:
                 losses += 1
+            resolved_in_order.append(status)
 
+    # --- Overall window stats ---
     if trades > 0:
         win_rate = wins / trades * 100
         avg_pnl = total_pnl / trades
-        lines.append(f"  Win rate: {wins}/{trades} ({win_rate:.0f}%), "
-                     f"Avg PnL: {avg_pnl:+.2f}%")
+        lines.append(
+            f"  Window stats ({trades} resolved): "
+            f"win rate {wins}/{trades} ({win_rate:.0f}%), avg PnL {avg_pnl:+.2f}%"
+        )
+
+    # --- Recent trend: last 5 vs last 10 ---
+    if len(resolved_in_order) >= 5:
+        last5 = resolved_in_order[-5:]
+        last10 = resolved_in_order[-10:] if len(resolved_in_order) >= 10 else resolved_in_order
+        l5_tp = sum(1 for s in last5 if s == "TP_HIT")
+        l5_sl = sum(1 for s in last5 if s == "SL_HIT")
+        l10_tp = sum(1 for s in last10 if s == "TP_HIT")
+        l10_sl = sum(1 for s in last10 if s == "SL_HIT")
+        lines.append(
+            f"  Trend — last 5 resolved: {l5_tp} TP / {l5_sl} SL | "
+            f"last {len(last10)} resolved: {l10_tp} TP / {l10_sl} SL"
+        )
+
+    # --- Consecutive SL streak (walk backwards through resolved outcomes) ---
+    consecutive_sl = 0
+    for s in reversed(resolved_in_order):
+        if s == "SL_HIT":
+            consecutive_sl += 1
+        else:
+            break
+
+    # --- RISK_LEVEL determination ---
+    last5_sl_count = sum(1 for s in resolved_in_order[-5:] if s == "SL_HIT") if resolved_in_order else 0
+
+    if consecutive_sl >= 4:
+        risk_level = "HIGH"
+        risk_rec = (
+            f"CONSECUTIVE_SL_STREAK={consecutive_sl}. "
+            "Raise effective confidence threshold to 0.80+. "
+            "Require ML models AND strategy signals AND confirming price action to all agree. "
+            "Strongly prefer NO_TRADE — waiting for a clearly superior setup has positive EV."
+        )
+    elif consecutive_sl >= 2 or last5_sl_count >= 3:
+        risk_level = "ELEVATED"
+        risk_rec = (
+            f"CONSECUTIVE_SL_STREAK={consecutive_sl}, recent SL rate elevated. "
+            "Raise effective confidence threshold to 0.70+. "
+            "Require 3 independent signal types (e.g., ML + strategy + market context) before entering."
+        )
+    else:
+        risk_level = "NORMAL"
+        risk_rec = (
+            "Standard thresholds apply: confidence >= 0.65, 2+ independent signal types aligned."
+        )
+
+    lines.append(f"  RISK_LEVEL: {risk_level}")
+    lines.append(f"  RECOMMENDATION: {risk_rec}")
 
     return "\n".join(lines)
 
 
 def save_decision(decision: dict):
     """Save a new decision to decision.json and append to history.
+
+    Skips appending to history if there is already a PENDING decision
+    with the same direction that hasn't expired yet (prevents decision
+    spam when the pipeline runs every 5 minutes).
 
     Args:
         decision: Dict with direction, confidence, entry_price, take_profit,
@@ -241,10 +319,40 @@ def save_decision(decision: dict):
     _save_json(DECISION_FILE, decision)
     log.info("Saved decision to %s", DECISION_FILE)
 
-    # Append to history with PENDING outcome (unless NO_TRADE)
+    direction = decision.get("direction", "")
+
+    # Check for existing unexpired PENDING decision with same direction
     history = _load_history()
+    if direction not in ("NO_TRADE", ""):
+        now = datetime.now(timezone.utc)
+        for entry in reversed(history):
+            if entry.get("outcome", {}).get("status") != "PENDING":
+                continue
+            if entry.get("direction") != direction:
+                continue
+            # Check if the pending decision has expired
+            entry_ts = entry.get("timestamp")
+            entry_dur = entry.get("duration_minutes", 120)
+            if entry_ts:
+                try:
+                    entry_time = datetime.fromisoformat(entry_ts)
+                    if entry_time.tzinfo is None:
+                        entry_time = entry_time.replace(tzinfo=timezone.utc)
+                    expiry = entry_time + pd.Timedelta(minutes=entry_dur)
+                    if now < expiry:
+                        log.info(
+                            "Skipping history append — active PENDING %s decision "
+                            "from %s (expires in %d min)",
+                            direction, entry_ts[:16],
+                            int((expiry - now).total_seconds() / 60),
+                        )
+                        return
+                except (ValueError, TypeError):
+                    pass
+
+    # Append to history with PENDING outcome (unless NO_TRADE)
     history_entry = dict(decision)
-    if decision.get("direction") == "NO_TRADE":
+    if direction == "NO_TRADE":
         history_entry["outcome"] = {"status": "NO_TRADE", "pnl_pct": 0.0}
     else:
         history_entry["outcome"] = {"status": "PENDING"}

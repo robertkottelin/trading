@@ -85,12 +85,12 @@ def get_trade_history(n_trades: int = 20, n_snapshots: int = 10) -> str:
             for t in entries[-10:]:
                 ts = t.get("timestamp", "?")[:16]
                 direction = t.get("direction", "?")
-                size = t.get("size_btc", 0)
-                fill = t.get("fill_price", 0)
-                tp = t.get("take_profit", 0)
-                sl = t.get("stop_loss", 0)
-                fee = t.get("fee_usd", 0)
-                notional = t.get("notional_usd", 0)
+                size = float(t.get("size_btc", 0))
+                fill = float(t.get("fill_price", 0) or 0)
+                tp = float(t.get("take_profit", 0) or 0)
+                sl = float(t.get("stop_loss", 0) or 0)
+                fee = float(t.get("fee_usd", 0) or 0)
+                notional = float(t.get("notional_usd", 0) or 0)
                 status = t.get("status", "?")
                 mode = t.get("mode", "?")
                 lines.append(

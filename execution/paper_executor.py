@@ -36,9 +36,17 @@ class PaperExecutor:
     def __init__(self, config: dict | None = None):
         full_cfg = config or _load_config()
         self.cfg = full_cfg.get("execution", {})
-        self.base_url = self.cfg.get(
-            "mainnet_rest_indexer", "https://indexer.dydx.trade/v4"
-        )
+        network = self.cfg.get("network", "testnet")
+        if network == "testnet":
+            self.base_url = self.cfg.get(
+                "testnet_rest_indexer",
+                "https://indexer.v4testnet.dydx.exchange/v4",
+            )
+        else:
+            self.base_url = self.cfg.get(
+                "mainnet_rest_indexer", "https://indexer.dydx.trade/v4"
+            )
+        self.network = network
         self.market = self.cfg.get("market", "BTC-USD")
         self.state_dir = self.cfg.get("state_data_dir", "state_data")
         self.risk = RiskManager(self.cfg)
@@ -69,9 +77,9 @@ class PaperExecutor:
 
         # Simulate fill
         record = self._simulate_fill(decision, portfolio, price)
-        if record.get("size_btc", 0) < 0.001:
+        if record.get("size_btc", 0) < 0.0001:
             reject = self._rejection_record(
-                decision, "computed position size below 0.001 BTC minimum"
+                decision, "computed position size below 0.0001 BTC minimum"
             )
             self._append_jsonl("trades.jsonl", reject)
             log.info("Paper trade rejected: size too small")
@@ -118,7 +126,8 @@ class PaperExecutor:
 
     def _fetch_portfolio(self) -> dict:
         """Build portfolio dict from Indexer REST (same data as portfolio_reader)."""
-        address = os.environ.get("ADDRESS", "")
+        env_var = "TEST_ADDRESS" if self.network == "testnet" else "ADDRESS"
+        address = os.environ.get(env_var, "") or os.environ.get("ADDRESS", "")
         portfolio = {
             "equity": 0.0,
             "free_collateral": 0.0,
@@ -155,14 +164,19 @@ class PaperExecutor:
         self, decision: dict, portfolio: dict, market_price: float
     ) -> dict:
         equity = portfolio["equity"]
-        size_pct = decision.get("position_size_pct", 0.05)
         entry_price = market_price  # paper fills at market
         max_btc = self.cfg.get("max_position_size_btc", 0.05)
 
-        size_btc = (equity * size_pct) / entry_price if entry_price > 0 else 0
+        # USD-denominated sizing (preferred); legacy pct fallback for old decision files
+        size_usd = decision.get("position_size_usd")
+        if size_usd is None:
+            size_pct = decision.get("position_size_pct", 0.05)
+            size_usd = equity * size_pct
+
+        size_btc = size_usd / entry_price if entry_price > 0 else 0
         size_btc = min(size_btc, max_btc)
-        size_btc = round(size_btc, 3)  # dYdX BTC-USD minimum tick
-        if size_btc < 0.001:
+        size_btc = round(size_btc, 4)  # dYdX BTC-USD step size (0.0001)
+        if size_btc < 0.0001:
             size_btc = 0  # signal caller to reject — too small to trade
 
         notional = size_btc * entry_price

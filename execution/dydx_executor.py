@@ -409,6 +409,201 @@ class DydxExecutor:
 
         return placed
 
+    async def trail_stops(self) -> dict:
+        """Move stop-loss orders upward (for LONGs) as unrealized PnL grows.
+
+        Checks each open position against configured trigger thresholds.
+        If unrealized PnL exceeds a threshold AND the current SL is below
+        the new target, cancels the existing SL and places a new one.
+
+        Thresholds (from config, all in %):
+          trail_trigger_pct_breakeven (default 2.0): move SL to entry price
+          trail_trigger_pct_lock1     (default 3.5): move SL to entry + lock1%
+          trail_trigger_pct_lock2     (default 5.0): move SL to entry + lock2%
+
+        Returns dict with positions_checked, stops_updated list, errors list.
+        """
+        from dydx4.clients.helpers.chain_helpers import (
+            OrderType, OrderSide, OrderTimeInForce, OrderExecution,
+        )
+
+        result = {"positions_checked": 0, "stops_updated": [], "errors": []}
+
+        t_be  = self.cfg.get("trail_trigger_pct_breakeven", 2.0) / 100
+        t_l1  = self.cfg.get("trail_trigger_pct_lock1", 3.5) / 100
+        t_l2  = self.cfg.get("trail_trigger_pct_lock2", 5.0) / 100
+        lock1 = self.cfg.get("trail_lock_pct_1", 1.5) / 100
+        lock2 = self.cfg.get("trail_lock_pct_2", 2.5) / 100
+
+        try:
+            portfolio   = await self.dydx.get_portfolio_state()
+            open_orders = await self.dydx.get_open_orders()
+        except Exception as e:
+            log.error("trail_stops: failed to fetch state: %s", e)
+            result["errors"].append(str(e))
+            return result
+
+        positions = portfolio.get("positions", [])
+        result["positions_checked"] = len(positions)
+
+        # Map market → STOP orders
+        stop_orders_by_market: dict[str, list[dict]] = {}
+        for o in open_orders:
+            if "STOP" in o.get("type", "").upper():
+                mkt = o["market"]
+                stop_orders_by_market.setdefault(mkt, []).append(o)
+
+        for pos in positions:
+            market   = pos["market"]
+            side     = pos["side"]        # "LONG" or "SHORT"
+            size     = float(pos["size"])
+            entry_px = float(pos["entry_price"])
+
+            try:
+                upnl_usd = float(pos.get("unrealized_pnl", 0) or 0)
+            except (ValueError, TypeError):
+                log.warning("trail_stops: could not parse unrealized_pnl for %s", market)
+                continue
+
+            if entry_px <= 0 or size <= 0:
+                continue
+
+            notional = entry_px * size
+            upnl_pct = upnl_usd / notional  # positive = profit
+
+            # Determine trail tier (highest applicable)
+            if side == "LONG":
+                if upnl_pct >= t_l2:
+                    new_sl_price = round(entry_px * (1 + lock2), 0)
+                    tier_name = f"lock2 (+{lock2*100:.1f}%)"
+                elif upnl_pct >= t_l1:
+                    new_sl_price = round(entry_px * (1 + lock1), 0)
+                    tier_name = f"lock1 (+{lock1*100:.1f}%)"
+                elif upnl_pct >= t_be:
+                    new_sl_price = round(entry_px, 0)
+                    tier_name = "breakeven"
+                else:
+                    log.debug("trail_stops: %s LONG PnL=%.2f%% below trigger %.2f%% — skip",
+                              market, upnl_pct * 100, t_be * 100)
+                    continue
+                close_side = OrderSide.SELL
+            elif side == "SHORT":
+                if upnl_pct >= t_l2:
+                    new_sl_price = round(entry_px * (1 - lock2), 0)
+                    tier_name = f"lock2 (-{lock2*100:.1f}%)"
+                elif upnl_pct >= t_l1:
+                    new_sl_price = round(entry_px * (1 - lock1), 0)
+                    tier_name = f"lock1 (-{lock1*100:.1f}%)"
+                elif upnl_pct >= t_be:
+                    new_sl_price = round(entry_px, 0)
+                    tier_name = "breakeven"
+                else:
+                    log.debug("trail_stops: %s SHORT PnL=%.2f%% below trigger %.2f%% — skip",
+                              market, upnl_pct * 100, t_be * 100)
+                    continue
+                close_side = OrderSide.BUY
+            else:
+                continue
+
+            # Idempotency: skip if existing SL already at or better than target
+            existing_stops = stop_orders_by_market.get(market, [])
+            if existing_stops:
+                if side == "LONG":
+                    best_sl = max(float(o.get("price", 0)) for o in existing_stops)
+                    if best_sl >= new_sl_price:
+                        log.debug("trail_stops: %s SL already at $%.0f >= target $%.0f — skip",
+                                  market, best_sl, new_sl_price)
+                        continue
+                else:
+                    best_sl = min(float(o.get("price", 0)) for o in existing_stops)
+                    if best_sl <= new_sl_price:
+                        log.debug("trail_stops: %s SL already at $%.0f <= target $%.0f — skip",
+                                  market, best_sl, new_sl_price)
+                        continue
+
+            log.info("trail_stops: %s %s PnL=%.2f%% → %s, new SL $%.0f",
+                     market, side, upnl_pct * 100, tier_name, new_sl_price)
+
+            # Cancel existing STOP orders for this market
+            cancel_ok = True
+            for stop_order in existing_stops:
+                try:
+                    client_id = int(stop_order["client_id"]) if str(stop_order["client_id"]).isdigit() else 0
+                    await self.dydx.cancel_order(
+                        client_id=client_id,
+                        order_flags=stop_order.get("order_flags", ""),
+                        good_til_block=stop_order.get("good_til_block"),
+                        good_til_block_time=stop_order.get("good_til_block_time"),
+                    )
+                    log.info("trail_stops: cancelled old SL %s", stop_order["order_id"])
+                except Exception as e:
+                    log.error("trail_stops: failed to cancel SL %s: %s", stop_order["order_id"], e)
+                    cancel_ok = False
+
+            if not cancel_ok:
+                log.warning("trail_stops: cancel failed for %s — skipping new SL placement", market)
+                result["errors"].append(f"{market}: cancel_failed")
+                continue
+
+            # Place new STOP_MARKET at trailed level (1% slippage tolerance)
+            if close_side == OrderSide.SELL:
+                sl_limit = round(new_sl_price * 0.99)
+            else:
+                sl_limit = round(new_sl_price * 1.01)
+
+            try:
+                self.dydx.client.place_order(
+                    self.dydx.subaccount,
+                    market=market,
+                    type=OrderType.STOP_MARKET,
+                    side=close_side,
+                    price=sl_limit,
+                    size=size,
+                    client_id=random.randint(0, MAX_CLIENT_ID),
+                    time_in_force=OrderTimeInForce.GTT,
+                    good_til_block=0,
+                    good_til_time_in_seconds=86400,
+                    execution=OrderExecution.IOC,
+                    post_only=False,
+                    reduce_only=True,
+                    trigger_price=new_sl_price,
+                )
+                log.info("trail_stops: new SL at $%.0f (limit $%.0f) for %s %s",
+                         new_sl_price, sl_limit, side, market)
+                self._append_jsonl("trades.jsonl", {
+                    "timestamp": _ts(),
+                    "action": "TRAIL_STOP_UPDATED",
+                    "market": market,
+                    "side": side,
+                    "size": size,
+                    "entry_price": entry_px,
+                    "new_sl_price": new_sl_price,
+                    "upnl_pct": round(upnl_pct * 100, 3),
+                    "tier": tier_name,
+                    "mode": "live",
+                    "status": "PLACED",
+                })
+                result["stops_updated"].append({
+                    "market": market,
+                    "tier": tier_name,
+                    "new_sl": new_sl_price,
+                })
+            except Exception as e:
+                log.error("trail_stops: failed to place new SL for %s: %s", market, e)
+                result["errors"].append(f"{market}: place_failed: {e}")
+                self._append_jsonl("trades.jsonl", {
+                    "timestamp": _ts(),
+                    "action": "TRAIL_STOP_PLACE_FAILED",
+                    "market": market,
+                    "side": side,
+                    "new_sl_price": new_sl_price,
+                    "error": str(e),
+                    "mode": "live",
+                    "status": "CRITICAL",
+                })
+
+        return result
+
     # ------------------------------------------------------------------
     # Order building
     # ------------------------------------------------------------------

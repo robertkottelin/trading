@@ -87,7 +87,7 @@ def run(args):
     mode = exec_cfg.get("mode", "paper")
     log.info("Config override — network: %s, mode: %s", network, mode)
     if mode == "live" and not args.no_execute:
-        log.info("Stage 0/7: Orphan cleanup + position monitoring...")
+        log.info("Stage 0/7: Orphan cleanup + position monitoring + trailing stops...")
         try:
             from execution.dydx_client import DydxClient
             from execution.dydx_executor import DydxExecutor
@@ -96,14 +96,16 @@ def run(args):
                 client = DydxClient(config=exec_cfg)
                 await client.connect()
                 try:
-                    executor = DydxExecutor(client, config=exec_cfg)
-                    cleaned = await executor.cleanup_orphan_orders()
-                    monitor = await executor.verify_position_orders()
-                    return cleaned, monitor
+                    executor  = DydxExecutor(client, config=exec_cfg)
+                    cleaned   = await executor.cleanup_orphan_orders()
+                    monitor   = await executor.verify_position_orders()
+                    trail     = await executor.trail_stops()
+                    portfolio = await client.get_portfolio_state()
+                    return cleaned, monitor, trail, portfolio
                 finally:
                     await client.disconnect()
 
-            cleaned, monitor = asyncio.run(_startup_checks())
+            cleaned, monitor, trail, startup_portfolio = asyncio.run(_startup_checks())
             if cleaned > 0:
                 log.warning("Cleaned up %d orphan order(s)", cleaned)
             if monitor["unprotected"]:
@@ -113,6 +115,25 @@ def run(args):
                         p["side"], p["size"], p["market"],
                         "+".join(p["missing"]),
                     )
+            if trail["stops_updated"]:
+                for s in trail["stops_updated"]:
+                    log.info("Trail stop updated: %s SL → $%.0f (%s)",
+                             s["market"], s["new_sl"], s["tier"])
+            if trail["errors"]:
+                log.warning("Trail stop errors: %s", trail["errors"])
+
+            # Early exit if in an active trade — Grok call not needed since
+            # max_open_positions=1 means any new signal would be rejected anyway.
+            # TP/SL orders + trailing stop already manage the position.
+            if startup_portfolio.get("positions"):
+                pos = startup_portfolio["positions"][0]
+                log.info(
+                    "Active %s position in %s — skipping Grok API call (saves API cost). "
+                    "Position protected by TP/SL orders and trailing stop.",
+                    pos.get("side", "?"), pos.get("market", "?"),
+                )
+                return
+
         except Exception as e:
             log.warning("Startup checks failed (non-fatal): %s", e)
 

@@ -102,16 +102,22 @@ execution:
   order_confirmation_wait_s: 5      # legacy — use fill_poll settings below
   fill_poll_max_attempts: 30        # max times to check Indexer for fill
   fill_poll_interval_s: 3           # seconds between fill poll attempts (total max wait: 90s)
-  confidence_threshold: 0.65
+  confidence_threshold: 0.62
   max_position_size_btc: 0.05
   max_position_pct: 0.25
   min_position_size_usd: 20
-  max_position_size_usd: 500
+  max_position_size_usd: 600
+  target_leverage: 5.0
   max_daily_loss_pct: 2.0
   max_open_positions: 1
   min_free_collateral_pct: 20.0
   min_equity_usd: 50
   state_data_dir: state_data
+  trail_trigger_pct_breakeven: 2.0
+  trail_trigger_pct_lock1: 3.5
+  trail_trigger_pct_lock2: 5.0
+  trail_lock_pct_1: 1.5
+  trail_lock_pct_2: 2.5
 
 # Pipeline timing — tiered download schedule
 pipeline:

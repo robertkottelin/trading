@@ -272,7 +272,7 @@ def get_recent_summary(n: int = 15) -> str:
     # --- RISK_LEVEL determination ---
     last5_sl_count = sum(1 for s in resolved_in_order[-5:] if s == "SL_HIT") if resolved_in_order else 0
 
-    if consecutive_sl >= 4:
+    if consecutive_sl >= 5:
         risk_level = "HIGH"
         risk_rec = (
             f"CONSECUTIVE_SL_STREAK={consecutive_sl}. "
@@ -280,7 +280,7 @@ def get_recent_summary(n: int = 15) -> str:
             "Require ML models AND strategy signals AND confirming price action to all agree. "
             "Strongly prefer NO_TRADE — waiting for a clearly superior setup has positive EV."
         )
-    elif consecutive_sl >= 2 or last5_sl_count >= 3:
+    elif consecutive_sl >= 3 or last5_sl_count >= 4:
         risk_level = "ELEVATED"
         risk_rec = (
             f"CONSECUTIVE_SL_STREAK={consecutive_sl}, recent SL rate elevated. "
@@ -290,7 +290,7 @@ def get_recent_summary(n: int = 15) -> str:
     else:
         risk_level = "NORMAL"
         risk_rec = (
-            "Standard thresholds apply: confidence >= 0.65, 2+ independent signal types aligned."
+            "Standard thresholds apply: confidence >= 0.62, 2+ independent signal types aligned."
         )
 
     lines.append(f"  RISK_LEVEL: {risk_level}")

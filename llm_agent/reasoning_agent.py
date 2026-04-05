@@ -72,9 +72,8 @@ def run(args):
     load_dotenv()
 
     # --- Stage 0: Orphan cleanup + position monitoring (live mode only) ---
-    exec_cfg = yaml.safe_load(
-        open("config/settings.yaml")
-    ).get("execution", {})
+    with open("config/settings.yaml") as _f:
+        exec_cfg = yaml.safe_load(_f).get("execution", {})
 
     # CLI overrides for network and mode
     if hasattr(args, "testnet"):

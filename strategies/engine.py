@@ -1,15 +1,20 @@
 """Strategy Engine — runs all 6 selected strategies and formats output for LLM.
 
 Usage:
-    # In pipeline (uses market_context_data/):
+    # In pipeline and backtesting (both use raw_data/ — the full historical dataset):
     from strategies.engine import StrategyEngine
-    engine = StrategyEngine()
+    engine = StrategyEngine()           # default data_dir="raw_data"
     result = engine.generate_signals()
     text = result["text_summary"]
 
-    # For backtesting (uses raw_data/):
-    engine = StrategyEngine(data_dir="raw_data")
+    # Override data directory if needed:
+    engine = StrategyEngine(data_dir="/path/to/data")
     result = engine.generate_signals()
+
+NOTE: Strategies require months of history (TrendFollowing uses a 21-day EMA =
+6048 5-min candles; FundingRate uses a 180-period z-score window).  The 24h
+rolling window in market_context_data/ is far too short.  Always point the
+engine at raw_data/ or a directory with equivalent historical depth.
 """
 
 import logging

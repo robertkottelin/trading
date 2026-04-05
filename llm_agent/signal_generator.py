@@ -200,7 +200,12 @@ def generate_signals() -> dict:
             log.warning("Model %s failed: %s", name, e)
             signals[name] = {"error": str(e), "signal": "ERROR"}
 
-    # Compute weighted consensus score
+    # Compute weighted consensus score — weighted average probability across ALL models.
+    # All v23 models are long-directional (trained on "up" targets), so prob represents
+    # P(bullish move). Including neutral (sub-threshold) probs gives a truer aggregate
+    # signal; the previous approach of zero-filling neutrals deflated the score heavily
+    # when many models were near-threshold (e.g. 5 firing at 0.75 + 20 neutral at 0.55
+    # used to yield 0.15, now correctly yields ~0.59).
     weighted_sum = 0.0
     weight_total = 0.0
     for s in signals.values():
@@ -208,9 +213,7 @@ def generate_signals() -> dict:
             continue
         w = s.get("quality_weight", 1.0)
         weight_total += w
-        if s["signal"] == "BULLISH":
-            weighted_sum += w * s["prob"]
-        # BEARISH models would subtract, but we only have long models
+        weighted_sum += w * s.get("prob", 0.0)
 
     weighted_score = weighted_sum / weight_total if weight_total > 0 else 0.0
 

@@ -82,25 +82,36 @@ class MomentumComposite(BaseStrategy):
 
     @staticmethod
     def _fisher_transform(high: pd.Series, low: pd.Series, period: int):
+        """Ehlers Fisher Transform (standard implementation).
+
+        Step 1: smooth the normalised price value[i] = 0.5*raw[i] + 0.5*value[i-1]
+        Step 2: Fisher[i] = 0.5*ln((1+value)/(1-value)) + 0.5*Fisher[i-1]
+
+        The previous code incorrectly used Fisher[i-1] (the log-transformed output,
+        which can be large) in place of value[i-1] (the smoothed raw in [-1,1]).
+        When Fisher grew beyond ~1 the sigmoid rescaling drove val to the clip
+        boundary every bar, locking the indicator at its extreme and preventing
+        reversion — producing permanently wrong cross signals.
+        """
         mid = (high + low) / 2
         lowest = mid.rolling(period, min_periods=period).min()
         highest = mid.rolling(period, min_periods=period).max()
         raw = 2 * (mid - lowest) / (highest - lowest + 1e-10) - 1
-        raw = raw.clip(-0.999, 0.999)  # Prevent infinity in log
+        raw = raw.clip(-0.999, 0.999)
 
-        fisher = pd.Series(0.0, index=raw.index)
-        for i in range(1, len(raw)):
-            if pd.isna(raw.iloc[i]):
-                fisher.iloc[i] = fisher.iloc[i - 1]
-            else:
-                # Smoothed value
-                val = 0.5 * raw.iloc[i] + 0.5 * (
-                    fisher.iloc[i - 1] * 2 / (1 + np.exp(-2 * fisher.iloc[i - 1] + 1e-10))
-                    if abs(fisher.iloc[i - 1]) < 10 else raw.iloc[i]
-                )
-                val = np.clip(val, -0.999, 0.999)
-                fisher.iloc[i] = 0.5 * np.log((1 + val) / (1 - val + 1e-10))
+        raw_arr = raw.to_numpy()
+        fisher_arr = np.zeros(len(raw_arr))
+        value = 0.0  # smoothed normalised price — kept separate from Fisher output
+        for i in range(1, len(raw_arr)):
+            r = raw_arr[i]
+            if np.isnan(r):
+                fisher_arr[i] = fisher_arr[i - 1]
+                continue
+            value = np.clip(0.5 * r + 0.5 * value, -0.999, 0.999)
+            fisher_arr[i] = (0.5 * np.log((1 + value) / (1 - value + 1e-10))
+                             + 0.5 * fisher_arr[i - 1])
 
+        fisher = pd.Series(fisher_arr, index=raw.index)
         signal = fisher.shift(1)
         return fisher, signal
 

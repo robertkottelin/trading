@@ -107,6 +107,7 @@ TRADING RULES:
 - This is a small account ($100-200). Fees and slippage are a significant percentage of each trade — only trade when the edge clearly justifies the cost. On a small account, a string of small SL hits destroys the account faster than missing opportunities.
 - 30-minute models (up_6_xxx) are the most reliable (AUC 0.85 for up_6_001).
 - Higher quality_weight models should be weighted more heavily in your analysis.
+- CRITICAL — ALL 25 ML MODELS ARE LONG-DIRECTIONAL ONLY: every model was trained on "up/fav" price targets. They can only signal BULLISH (firing) or NEUTRAL (not firing). A NEUTRAL or low weighted_score means "insufficient bullish evidence" — it does NOT constitute a bearish signal. Never use neutral ML consensus as confirmation for a SHORT trade. Short thesis must be supported entirely by conventional strategy signals and/or market context (funding, OI, price action, sentiment).
 
 STRATEGY SIGNAL INTERPRETATION:
 - The 6 conventional strategies analyze different market drivers that move BTC price.

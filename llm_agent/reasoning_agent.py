@@ -95,7 +95,12 @@ def run(args):
                 client = DydxClient(config=exec_cfg)
                 await client.connect()
                 try:
-                    executor = DydxExecutor(client, config=exec_cfg)
+                    # Do NOT pass exec_cfg here — exec_cfg is already the
+                    # "execution" subsection, but DydxExecutor expects the
+                    # full settings dict (it calls full_cfg.get("execution")).
+                    # Passing exec_cfg would make self.cfg = {} (wrong defaults).
+                    # Let DydxExecutor load the full config from settings.yaml.
+                    executor = DydxExecutor(client)
                     cleaned = await executor.cleanup_orphan_orders()
                     monitor = await executor.verify_position_orders()
                     return cleaned, monitor

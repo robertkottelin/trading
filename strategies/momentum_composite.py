@@ -202,14 +202,20 @@ class MomentumComposite(BaseStrategy):
 
     def _score_volatility(self, pct_b: pd.Series, bb_width: pd.Series,
                            close: pd.Series, bb_mid: pd.Series) -> pd.Series:
-        """Sub-signal C: Volatility Context from Bollinger Bands."""
+        """Sub-signal C: Volatility Context from Bollinger Bands.
+
+        Uses mean-reversion interpretation at extremes, consistent with the
+        RSI (oversold=bullish) and Fisher Transform (extreme low=bullish)
+        sub-signals.  Price above upper band = overbought (bearish); price
+        below lower band = oversold (bullish).
+        """
         score = pd.Series(0.0, index=pct_b.index)
 
-        # %B position
-        score += np.where(pct_b > 0.7, 0.5, np.where(pct_b < 0.3, -0.5, 0))
+        # %B position — approaching band extremes signals overextension
+        score += np.where(pct_b > 0.7, -0.5, np.where(pct_b < 0.3, 0.5, 0))
 
-        # %B breakout (beyond bands)
-        score += np.where(pct_b > 1.0, 1.0, np.where(pct_b < 0.0, -1.0, 0))
+        # %B outside bands — strong mean-reversion signal (matches RSI/Fisher logic)
+        score += np.where(pct_b > 1.0, -1.0, np.where(pct_b < 0.0, 1.0, 0))
 
         # BB width squeeze + price position
         width_pctile = bb_width.rolling(60, min_periods=20).apply(

@@ -199,6 +199,12 @@ def get_decision(prompt: str, enable_web_search: bool = True) -> dict:
             _write_failure_count(0)
             return decision
 
+        except RuntimeError as e:
+            # Decision parse/validation failure — Grok returned structurally bad
+            # content.  Log and retry; don't sleep (no point waiting for a new
+            # response that's identical to the last one).
+            last_error = str(e)
+            log.warning("Decision invalid (attempt %d/%d): %s", attempt + 1, MAX_RETRIES, e)
         except requests.RequestException as e:
             last_error = f"API request failed: {e}"
             log.warning(last_error)
@@ -244,40 +250,57 @@ def _extract_text(response_data: dict) -> str:
 
 
 def _parse_decision(raw_text: str) -> dict:
-    """Parse the JSON decision from Grok's text response."""
-    # Try direct parse first
+    """Parse the JSON decision from Grok's text response.
+
+    Parsing (syntax) and validation (semantics) are kept separate so that a
+    structurally valid JSON with bad field values surfaces a clear error instead
+    of silently falling through to a misleading "Could not parse JSON" failure.
+    """
+    parsed = None
+
+    # Strategy 1: direct JSON parse
     try:
-        decision = json.loads(raw_text)
-        _validate_decision(decision)
-        return decision
-    except (json.JSONDecodeError, ValueError):
+        parsed = json.loads(raw_text)
+    except json.JSONDecodeError:
         pass
 
-    # Try to extract JSON from markdown code block
-    for marker in ["```json", "```"]:
-        if marker in raw_text:
-            start = raw_text.index(marker) + len(marker)
-            end = raw_text.index("```", start) if "```" in raw_text[start:] else len(raw_text)
+    # Strategy 2: extract from markdown code block
+    if parsed is None:
+        for marker in ["```json", "```"]:
+            if marker in raw_text:
+                start = raw_text.index(marker) + len(marker)
+                end = raw_text.index("```", start) if "```" in raw_text[start:] else len(raw_text)
+                try:
+                    parsed = json.loads(raw_text[start:end].strip())
+                    break
+                except json.JSONDecodeError:
+                    pass
+
+    # Strategy 3: find outermost JSON object in text
+    if parsed is None:
+        brace_start = raw_text.find("{")
+        brace_end = raw_text.rfind("}") + 1
+        if brace_start >= 0 and brace_end > brace_start:
             try:
-                decision = json.loads(raw_text[start:end].strip())
-                _validate_decision(decision)
-                return decision
-            except (json.JSONDecodeError, ValueError):
+                parsed = json.loads(raw_text[brace_start:brace_end])
+            except json.JSONDecodeError:
                 pass
 
-    # Try to find JSON object in text
-    brace_start = raw_text.find("{")
-    brace_end = raw_text.rfind("}") + 1
-    if brace_start >= 0 and brace_end > brace_start:
-        try:
-            decision = json.loads(raw_text[brace_start:brace_end])
-            _validate_decision(decision)
-            return decision
-        except (json.JSONDecodeError, ValueError):
-            pass
+    if parsed is None:
+        log.error("Failed to parse Grok response as JSON: %s", raw_text[:500])
+        raise RuntimeError("Could not parse JSON decision from Grok response")
 
-    log.error("Failed to parse Grok response: %s", raw_text[:500])
-    raise RuntimeError(f"Could not parse JSON decision from Grok response")
+    # Semantic validation — runs once on the successfully parsed dict.
+    # ValueError here means Grok returned invalid field values (not a syntax
+    # problem), so we surface it as a clear RuntimeError rather than silently
+    # swallowing it in a bare except clause.
+    try:
+        _validate_decision(parsed)
+    except ValueError as exc:
+        log.error("Grok decision failed validation: %s | raw: %.300s", exc, raw_text)
+        raise RuntimeError(f"Grok decision validation failed: {exc}") from exc
+
+    return parsed
 
 
 def _validate_decision(decision: dict):
@@ -322,6 +345,33 @@ def _validate_decision(decision: dict):
         if direction == "SHORT" and not (sl > entry > tp):
             raise ValueError(
                 f"SHORT price ordering invalid: SL({sl}) > entry({entry}) > TP({tp})")
+
+        # Risk:reward ratio (same floor the RiskManager applies — catch early)
+        risk = abs(entry - sl)
+        reward = abs(tp - entry)
+        if risk <= 0:
+            raise ValueError("risk is zero (entry == stop_loss)")
+        rr = reward / risk
+        if rr < 1.5:
+            raise ValueError(
+                f"risk:reward {rr:.2f}:1 below minimum 1.5:1 "
+                f"(entry={entry}, TP={tp}, SL={sl})")
+
+        # Minimum SL distance — BTC noise floor enforcement.
+        # Stops tighter than 1.5% on 60+ min trades and 1.0% on 30-59 min trades
+        # are routinely taken out by normal volatility before the thesis plays out.
+        sl_distance_pct = risk / entry * 100
+        if dur >= 60:
+            min_sl_pct = 1.5
+        elif dur >= 30:
+            min_sl_pct = 1.0
+        else:
+            min_sl_pct = 0.5
+        if sl_distance_pct < min_sl_pct:
+            raise ValueError(
+                f"SL distance {sl_distance_pct:.2f}% below minimum {min_sl_pct:.1f}% "
+                f"for {dur}min trade — stop too tight for BTC noise floor"
+            )
 
     # Set defaults for NO_TRADE
     if decision["direction"] == "NO_TRADE":

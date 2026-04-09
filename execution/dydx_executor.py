@@ -507,6 +507,10 @@ class DydxExecutor:
             if "sequence" in str(e).lower():
                 log.warning("Wallet sequence mismatch, retrying: %s", e)
                 try:
+                    # Use a new client_id and capture it so fill polling
+                    # tracks the actual order that was submitted, not the
+                    # rejected one from the first attempt.
+                    retry_client_id = random.randint(0, MAX_CLIENT_ID)
                     tx = self.dydx.client.place_short_term_order(
                         subaccount,
                         market=self.cfg.get("market", "BTC-USD"),
@@ -514,11 +518,12 @@ class DydxExecutor:
                         type=OrderType.MARKET,
                         price=limit_price,
                         size=params["size_btc"],
-                        client_id=random.randint(0, MAX_CLIENT_ID),
+                        client_id=retry_client_id,
                         good_til_block=good_til_block,
                         time_in_force=Order_TimeInForce.TIME_IN_FORCE_IOC,
                         reduce_only=False,
                     )
+                    client_id = retry_client_id  # update for fill poll below
                 except Exception as retry_err:
                     log.error("Entry order retry failed: %s", retry_err)
                     record_base["status"] = "FAILED"

@@ -254,11 +254,13 @@ def get_recent_summary(n: int = 15) -> str:
         last10 = resolved_in_order[-10:] if len(resolved_in_order) >= 10 else resolved_in_order
         l5_tp = sum(1 for s in last5 if s == "TP_HIT")
         l5_sl = sum(1 for s in last5 if s == "SL_HIT")
+        l5_exp = sum(1 for s in last5 if s == "EXPIRED")
         l10_tp = sum(1 for s in last10 if s == "TP_HIT")
         l10_sl = sum(1 for s in last10 if s == "SL_HIT")
+        l10_exp = sum(1 for s in last10 if s == "EXPIRED")
         lines.append(
-            f"  Trend — last 5 resolved: {l5_tp} TP / {l5_sl} SL | "
-            f"last {len(last10)} resolved: {l10_tp} TP / {l10_sl} SL"
+            f"  Trend — last 5 resolved: {l5_tp} TP / {l5_sl} SL / {l5_exp} EXPIRED | "
+            f"last {len(last10)} resolved: {l10_tp} TP / {l10_sl} SL / {l10_exp} EXPIRED"
         )
 
     # --- Consecutive SL streak (walk backwards through resolved outcomes) ---

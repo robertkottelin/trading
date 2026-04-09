@@ -285,35 +285,49 @@ class MomentumComposite(BaseStrategy):
         signal = np.zeros(len(daily))
         confidence = np.zeros(len(daily))
         in_position = 0
+        # Track the last non-NaN confidence separately so that NaN score bars
+        # (missing data days) don't collapse the decay chain to 0.  Without
+        # this, a single NaN bar sets confidence[i]=0 and every subsequent
+        # hold bar multiplies from 0, reporting 0% confidence for the entire
+        # remainder of a valid position.
+        last_valid_conf = 0.0
 
         for i in range(1, len(daily)):
             score = daily["total_score"].iloc[i]
             if pd.isna(score):
+                # Carry position through NaN bars; keep decaying confidence
                 signal[i] = in_position
-                confidence[i] = 0.0
+                if in_position != 0:
+                    last_valid_conf *= 0.95
+                    confidence[i] = last_valid_conf
                 continue
 
             if score > self.LONG_THRESHOLD:
                 signal[i] = 1
-                confidence[i] = min(0.55 + (score - self.LONG_THRESHOLD) * 0.05, 0.90)
+                last_valid_conf = min(0.55 + (score - self.LONG_THRESHOLD) * 0.05, 0.90)
+                confidence[i] = last_valid_conf
                 in_position = 1
             elif score < self.SHORT_THRESHOLD:
                 signal[i] = -1
-                confidence[i] = min(0.55 + abs(score - self.SHORT_THRESHOLD) * 0.05, 0.90)
+                last_valid_conf = min(0.55 + abs(score - self.SHORT_THRESHOLD) * 0.05, 0.90)
+                confidence[i] = last_valid_conf
                 in_position = -1
             elif in_position != 0:
                 # Exit when score fades toward neutral
                 if abs(score) < self.EXIT_THRESHOLD:
                     signal[i] = 0
                     confidence[i] = 0.0
+                    last_valid_conf = 0.0
                     in_position = 0
                 else:
-                    # Hold but decay confidence
+                    # Hold but decay confidence from last valid (non-NaN) bar
+                    last_valid_conf *= 0.95
                     signal[i] = in_position
-                    confidence[i] = confidence[i - 1] * 0.95
+                    confidence[i] = last_valid_conf
             else:
                 signal[i] = 0
                 confidence[i] = 0.0
+                last_valid_conf = 0.0
 
         daily["signal"] = signal.astype(int)
         daily["confidence"] = confidence

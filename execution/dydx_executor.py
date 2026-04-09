@@ -394,10 +394,11 @@ class DydxExecutor:
                 })
             except Exception as e:
                 log.error("Failed to re-place SL for %s: %s", market, e)
-                # SL is critical — if it fails and we couldn't place it,
-                # attempt emergency close
-                if not placed:  # Neither TP nor SL placed
-                    log.warning("Cannot protect position — attempting emergency close")
+                # SL is critical — emergency-close regardless of whether TP
+                # was placed.  A position with TP but no SL has unlimited
+                # downside on a leveraged perpetual.
+                if "SL" not in placed:
+                    log.warning("SL re-placement failed — attempting emergency close")
                     from dydx4.clients.helpers.chain_helpers import OrderSide as OS
                     await self._emergency_close(
                         {"size_btc": size, "market_price": entry_price},

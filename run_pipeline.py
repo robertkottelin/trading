@@ -153,14 +153,14 @@ def run_reasoning_agent(args) -> bool:
         cmd.append("--paper")
 
     try:
-        rc, _, _ = _run_with_pg(cmd, timeout=300)
+        rc, _, _ = _run_with_pg(cmd, timeout=600)
         if rc != 0:
             log.error("Reasoning agent exited with code %d", rc)
             return False
         log.info("Reasoning agent completed successfully")
         return True
     except subprocess.TimeoutExpired:
-        log.error("Reasoning agent timed out (5 min)")
+        log.error("Reasoning agent timed out (10 min)")
         return False
     except Exception as e:
         log.error("Reasoning agent failed: %s", e)

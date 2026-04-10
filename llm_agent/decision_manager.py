@@ -229,6 +229,9 @@ def get_recent_summary(n: int = 15) -> str:
 
         if status == "PENDING":
             lines.append(f"  #{i}: {ts} {direction} -> PENDING")
+        elif status == "EXECUTION_REJECTED":
+            # Decision was made but never executed — exclude from win-rate stats
+            lines.append(f"  #{i}: {ts} {direction} -> NOT_EXECUTED (pre-trade risk rejection)")
         else:
             lines.append(f"  #{i}: {ts} {direction} -> {status} {pnl:+.2f}% in {dur}min")
             trades += 1
@@ -361,6 +364,29 @@ def save_decision(decision: dict):
     history.append(history_entry)
     _save_json(HISTORY_FILE, history)
     log.info("Appended decision to history (%d total)", len(history))
+
+
+def mark_last_pending_rejected(reason: str = "pre-trade risk rejection"):
+    """Mark the most recent non-NO_TRADE PENDING decision as EXECUTION_REJECTED.
+
+    Called after the executor rejects a trade so the LLM's performance history
+    only reflects decisions that were actually executed on-chain, not ones blocked
+    by the risk manager or size checks.  Without this, phantom PENDING entries
+    pollute win-rate tracking and corrupt RISK_LEVEL / streak analysis.
+    """
+    history = _load_history()
+    for entry in reversed(history):
+        if (entry.get("outcome", {}).get("status") == "PENDING"
+                and entry.get("direction") not in ("NO_TRADE", "")):
+            entry["outcome"] = {
+                "status": "EXECUTION_REJECTED",
+                "pnl_pct": 0.0,
+                "reason": reason,
+            }
+            _save_json(HISTORY_FILE, history)
+            log.info("Marked last PENDING decision as EXECUTION_REJECTED: %s", reason)
+            return True
+    return False
 
 
 def get_current_decision() -> dict | None:

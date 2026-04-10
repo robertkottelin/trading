@@ -185,14 +185,15 @@ class FundingRateReversion(BaseStrategy):
                     signal[i] = in_position
                     confidence[i] = confidence[i - 1] * 0.9 if in_position != 0 else 0
             elif in_position != 0:
-                # Exit when z-score normalizes
-                if abs(z_s) < self.EXIT_Z:
+                # Exit when z-score normalizes OR confidence has decayed too far
+                decayed_conf = confidence[i - 1] * 0.95
+                if abs(z_s) < self.EXIT_Z or decayed_conf < 0.40:
                     signal[i] = 0
                     confidence[i] = 0.0
                     in_position = 0
                 else:
                     signal[i] = in_position
-                    confidence[i] = confidence[i - 1] * 0.95
+                    confidence[i] = decayed_conf
             else:
                 signal[i] = 0
                 confidence[i] = 0.0

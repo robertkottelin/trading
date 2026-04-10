@@ -16,7 +16,7 @@ import logging
 import os
 import random
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 import yaml
@@ -554,6 +554,9 @@ class DydxExecutor:
         """Poll Indexer for fill confirmation with retries."""
         max_attempts = self.cfg.get("fill_poll_max_attempts", 10)
         poll_interval_s = self.cfg.get("fill_poll_interval_s", 2)
+        # Record when the order was submitted so the fallback path cannot
+        # accidentally match a fill from a previous pipeline run.
+        poll_start = datetime.now(timezone.utc)
 
         for attempt in range(max_attempts):
             await asyncio.sleep(poll_interval_s)
@@ -564,25 +567,29 @@ class DydxExecutor:
                 )
                 fills_resp = self.dydx._unwrap(fills_raw)
                 fills = fills_resp.get("fills", [])
-                # Try to match by clientId if available, else take most recent
+                # Primary: match by clientId (exact, safe across runs)
                 for fill in fills:
                     if fill.get("clientId") == str(client_id):
                         log.info("Fill confirmed (matched clientId) on attempt %d", attempt + 1)
                         return fill
-                # Fallback: return most recent fill only if it's fresh (within last 120s)
+                # Fallback: accept most recent fill only if it occurred AFTER this
+                # order was submitted (with 10s grace for indexer latency / clock
+                # drift).  The old 120s window was wide enough to match fills from
+                # the previous pipeline cycle, recording the wrong fill price.
                 if fills:
-                    from datetime import datetime, timezone
                     fill_ts = fills[0].get("createdAt", "")
                     if fill_ts:
                         try:
                             fill_time = datetime.fromisoformat(fill_ts.replace("Z", "+00:00"))
-                            age_s = (datetime.now(timezone.utc) - fill_time).total_seconds()
-                            if age_s < 120:
-                                log.info("Fill found (recent fill %.0fs old, no clientId match) on attempt %d",
+                            cutoff = poll_start - timedelta(seconds=10)
+                            if fill_time >= cutoff:
+                                age_s = (datetime.now(timezone.utc) - fill_time).total_seconds()
+                                log.info("Fill found (%.0fs old, no clientId match) on attempt %d",
                                          age_s, attempt + 1)
                                 return fills[0]
                             else:
-                                log.debug("Most recent fill is %.0fs old — too stale, continuing poll", age_s)
+                                log.debug("Most recent fill predates poll start by %.0fs — skipping stale fill",
+                                          (poll_start - fill_time).total_seconds())
                         except (ValueError, TypeError):
                             pass
             except Exception as e:
@@ -729,6 +736,15 @@ class DydxExecutor:
                 return
 
             price = await self.dydx.get_current_price()
+            # Add 0.5% slippage buffer so the IOC order fills even if the market
+            # has moved since the price quote.  Without this the order is rejected
+            # by the matching engine if the fill price crosses the limit, leaving
+            # the position unprotected at 5x leverage.
+            from dydx4.clients.helpers.chain_helpers import OrderSide as _OS
+            if close_side == _OS.SELL:
+                limit_price = round(price * 0.995)  # accept up to 0.5% below mid
+            else:
+                limit_price = round(price * 1.005)  # accept up to 0.5% above mid
             block_height = await self.dydx.get_latest_block_height()
             good_til_block = block_height + self.cfg.get("short_term_block_offset", 10)
             self.dydx.client.place_short_term_order(
@@ -736,14 +752,15 @@ class DydxExecutor:
                 market=market,
                 side=close_side,
                 type=OrderType.MARKET,
-                price=price,
+                price=limit_price,
                 size=actual_size,
                 client_id=random.randint(0, MAX_CLIENT_ID),
                 good_til_block=good_til_block,
                 time_in_force=Order_TimeInForce.TIME_IN_FORCE_IOC,
                 reduce_only=True,
             )
-            log.info("Emergency close order submitted for %.4f BTC", actual_size)
+            log.info("Emergency close order submitted for %.4f BTC @ limit $%.0f",
+                     actual_size, limit_price)
             self._append_jsonl("trades.jsonl", {
                 "timestamp": _ts(),
                 "action": "EMERGENCY_CLOSE",

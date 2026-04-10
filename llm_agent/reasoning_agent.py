@@ -261,6 +261,14 @@ def run(args):
             log.info("Execution complete: %s — %s", action, status)
             if action == "REJECTED":
                 print(f"  Trade rejected: {trade.get('rejection_reason', '?')}")
+                # Update decision history so this never-executed decision doesn't
+                # contaminate the LLM's win-rate / RISK_LEVEL self-assessment.
+                try:
+                    decision_manager.mark_last_pending_rejected(
+                        reason=trade.get("rejection_reason", "pre-trade risk rejection")
+                    )
+                except Exception as _e:
+                    log.warning("Failed to update history with rejection: %s", _e)
             elif action == "ENTRY":
                 print(f"  {trade.get('direction')} {trade.get('size_btc')} BTC "
                       f"@ ${trade.get('fill_price', 0):,.2f} [{status}]")

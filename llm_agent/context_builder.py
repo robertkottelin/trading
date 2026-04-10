@@ -190,6 +190,8 @@ def _section_options() -> str:
 
     opts = _read_csv("deribit_options_summary.csv")
     if opts is not None and len(opts) > 0:
+        if "timestamp" in opts.columns:
+            opts = opts.sort_values("timestamp")
         latest = opts.iloc[-1]
         if "put_call_oi_ratio" in opts.columns:
             lines.append(f"  Put/Call OI ratio: {float(latest['put_call_oi_ratio']):.4f}")
@@ -203,6 +205,8 @@ def _section_options() -> str:
 
     hvol = _read_csv("deribit_historical_vol.csv")
     if hvol is not None and len(hvol) > 0:
+        if "timestamp_ms" in hvol.columns:
+            hvol = hvol.sort_values("timestamp_ms")
         latest = hvol.iloc[-1]
         for col in hvol.columns:
             if "realized" in col.lower() or "historical" in col.lower():
@@ -233,6 +237,8 @@ def _section_onchain() -> str:
 
     mempool = _read_csv("btc_network_mempool.csv")
     if mempool is not None and len(mempool) > 0:
+        if "timestamp" in mempool.columns:
+            mempool = mempool.sort_values("timestamp")
         latest = mempool.iloc[-1]
         if "mempool_count" in mempool.columns:
             lines.append(f"  Mempool txs: {_fmt_num(float(latest['mempool_count']), 0)}")
@@ -241,6 +247,8 @@ def _section_onchain() -> str:
 
     mining = _read_csv("btc_network_mining.csv")
     if mining is not None and len(mining) > 0:
+        if "date" in mining.columns:
+            mining = mining.sort_values("date")
         latest = mining.iloc[-1]
         if "avg_hashrate" in mining.columns:
             lines.append(f"  Mining avg hashrate: {float(latest['avg_hashrate']):.2e}")

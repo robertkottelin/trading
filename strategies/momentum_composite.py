@@ -313,8 +313,13 @@ class MomentumComposite(BaseStrategy):
                 confidence[i] = last_valid_conf
                 in_position = -1
             elif in_position != 0:
-                # Exit when score fades toward neutral
-                if abs(score) < self.EXIT_THRESHOLD:
+                # Exit when score fades toward neutral OR confidence has decayed
+                # too far.  Without the floor an old position lingers indefinitely
+                # as a ghost signal (e.g. LONG conf=0.04) that misleads the LLM
+                # consensus count.  0.40 floor ≈ 6-14 daily bars depending on
+                # entry strength before the hold state auto-exits.
+                decayed_conf = confidence[i - 1] * 0.95
+                if abs(score) < self.EXIT_THRESHOLD or decayed_conf < 0.40:
                     signal[i] = 0
                     confidence[i] = 0.0
                     last_valid_conf = 0.0

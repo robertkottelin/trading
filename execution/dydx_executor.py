@@ -473,6 +473,16 @@ class DydxExecutor:
             "mode": "live",
         }
 
+        # Compute order side and slippage-adjusted limit price before the try block
+        # so both the initial attempt AND the sequence-mismatch retry can use them
+        # without risking a NameError if an exception fires before these lines.
+        order_side = OrderSide.BUY if params["direction"] == "LONG" else OrderSide.SELL
+        # Add 0.5% slippage tolerance for IOC orders
+        if order_side == OrderSide.BUY:
+            limit_price = round(params["market_price"] * 1.005)  # willing to pay up to 0.5% above
+        else:
+            limit_price = round(params["market_price"] * 0.995)  # willing to sell down to 0.5% below
+
         try:
             block_height = await self.dydx.get_latest_block_height()
             good_til_block = block_height + self.cfg.get("short_term_block_offset", 10)
@@ -482,12 +492,6 @@ class DydxExecutor:
 
             client_id = random.randint(0, MAX_CLIENT_ID)
 
-            order_side = OrderSide.BUY if params["direction"] == "LONG" else OrderSide.SELL
-            # Add 0.5% slippage tolerance for IOC orders
-            if order_side == OrderSide.BUY:
-                limit_price = round(params["market_price"] * 1.005)  # willing to pay up to 0.5% above
-            else:
-                limit_price = round(params["market_price"] * 0.995)  # willing to sell down to 0.5% below
             tx = self.dydx.client.place_short_term_order(
                 subaccount,
                 market=self.cfg.get("market", "BTC-USD"),

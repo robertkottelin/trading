@@ -377,7 +377,7 @@ def _format_signals_text(signals: dict, consensus: dict) -> str:
             lines.append(f"    {name}: {s.get('error', 'unknown')}")
 
     ws = consensus["weighted_score"]
-    # Strength label — all models are long-directional (0 = no signal, 1 = max bullish).
+    # Strength label — all models are long-directional (0.50 = neutral, 1.0 = max bullish).
     # Typical firing thresholds are 0.55–0.75; score reflects average P(bullish move).
     if ws >= 0.65:
         ws_label = "STRONG BULLISH"
@@ -387,10 +387,10 @@ def _format_signals_text(signals: dict, consensus: dict) -> str:
         ws_label = "WEAK / BORDERLINE"
     else:
         ws_label = "NO BULLISH SIGNAL"
+    # NOTE: bearish_count is always 0 — all v23 models are long-directional only.
     lines.append(
-        f"  Consensus: {b}/{total} bullish, "
-        f"{consensus['bearish_count']}/{total} bearish (models are long-directional only), "
-        f"weighted score: {ws:.4f} [{ws_label}]"
+        f"  Consensus: {b}/{total} models firing (BULLISH), {n}/{total} below threshold (NEUTRAL); "
+        f"weighted avg P(bullish)={ws:.4f} [{ws_label}]"
     )
 
     return "\n".join(lines)

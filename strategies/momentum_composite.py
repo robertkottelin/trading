@@ -18,7 +18,7 @@ from strategies.base import BaseStrategy, StrategySignal
 class MomentumComposite(BaseStrategy):
 
     name = "Technical Momentum"
-    description = "Multi-indicator momentum composite (RSI, MACD, Stochastic, Bollinger, Fisher, CCI)"
+    description = "Multi-indicator momentum composite (RSI, MACD, Stochastic, Bollinger, Fisher, CCI) on 4h bars"
     data_files = ["binance_futures_klines_5m.csv"]
 
     # Indicator parameters
@@ -124,9 +124,21 @@ class MomentumComposite(BaseStrategy):
         )
         return (tp - sma) / (0.015 * mad + 1e-10)
 
-    # ── Build daily data ────────────────────────────────────────────────
+    # ── Build 4-hour bars ───────────────────────────────────────────────
 
-    def _build_daily(self, data: dict) -> pd.DataFrame:
+    def _build_4h(self, data: dict) -> pd.DataFrame:
+        """Aggregate 5-min candles into 4-hour bars.
+
+        4-hour bars update 6× per day, making oscillators (RSI, MACD, Stoch,
+        Fisher, CCI) actually responsive to intraday moves.  The previous daily
+        aggregation produced a constant signal for all 288 five-minute pipeline
+        cycles within a day — useless for the bot's 30–120 minute trade horizon.
+
+        A calendar 'date' column is retained so the backtest engine (which merges
+        on date) still receives one row per day (the last 4h bar of the day).
+        The live signal path (compute_signal) reads series.iloc[-1], which is
+        the most recently updated 4h bar of the current day.
+        """
         df = data.get("binance_futures_klines_5m.csv", pd.DataFrame())
         if df.empty or "close" not in df.columns:
             return pd.DataFrame()
@@ -135,19 +147,22 @@ class MomentumComposite(BaseStrategy):
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
         df["ts_ms"] = pd.to_numeric(df["open_time_ms"], errors="coerce")
-        df["datetime"] = pd.to_datetime(df["ts_ms"], unit="ms", utc=True)
-        df["date"] = df["datetime"].dt.date
-        df = df.sort_values("ts_ms")
+        df = df.sort_values("ts_ms").dropna(subset=["ts_ms"])
 
-        daily = df.groupby("date").agg(
+        # Floor to UTC-aligned 4-hour buckets (00:00, 04:00, 08:00, 12:00, 16:00, 20:00)
+        df["bucket"] = pd.to_datetime(df["ts_ms"], unit="ms", utc=True).dt.floor("4h")
+
+        bars = df.groupby("bucket").agg(
             open=("open", "first"),
             high=("high", "max"),
             low=("low", "min"),
             close=("close", "last"),
             volume=("volume", "sum"),
         ).reset_index()
-        daily = daily.sort_values("date").reset_index(drop=True)
-        return daily
+        bars = bars.sort_values("bucket").reset_index(drop=True)
+        # Keep calendar date for backtest merge compatibility
+        bars["date"] = pd.to_datetime(bars["bucket"]).dt.date
+        return bars
 
     # ── Scoring sub-signals ─────────────────────────────────────────────
 
@@ -249,8 +264,9 @@ class MomentumComposite(BaseStrategy):
     # ── Main signal series ──────────────────────────────────────────────
 
     def compute_signal_series(self, data: dict) -> pd.DataFrame:
-        daily = self._build_daily(data)
-        if daily.empty or len(daily) < 50:
+        # Use 4h bars — minimum 100 bars ≈ 16.7 days, enough for MACD(26) warmup
+        daily = self._build_4h(data)
+        if daily.empty or len(daily) < 100:
             return pd.DataFrame()
 
         # Compute all indicators
@@ -337,9 +353,14 @@ class MomentumComposite(BaseStrategy):
         daily["signal"] = signal.astype(int)
         daily["confidence"] = confidence
 
-        return daily[["date", "signal", "confidence", "total_score",
-                       "rsi", "macd_hist", "stoch_k", "cci",
-                       "fisher", "pct_b"]].copy()
+        result = daily[["date", "signal", "confidence", "total_score",
+                         "rsi", "macd_hist", "stoch_k", "cci",
+                         "fisher", "pct_b"]].copy()
+        # One row per calendar date: keeps the most recent 4h bar's state.
+        # - Live (compute_signal): series.iloc[-1] = latest intraday 4h bar → fresh signal.
+        # - Backtest: one entry per day matches the daily price reference merge key.
+        result = result.drop_duplicates(subset="date", keep="last")
+        return result
 
     def compute_signal(self, data: dict) -> StrategySignal:
         series = self.compute_signal_series(data)

@@ -1,585 +1,391 @@
-# Trading Pipeline Architecture
+# BTC Perpetual Futures Trading System
 
-> ML ensemble + LLM reasoning + automated execution system for BTC perpetual futures on dYdX v4.
+> ML ensemble + 18 conventional strategies + LLM reasoning → automated execution on dYdX v4 mainnet.
+
+---
+
+## Data Flow
+
+```
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ run_pipeline.py  (every 300s, tiered downloads)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  STEP 1 — Market Context Download  →  market_context_data/
+  ┌────────────────────────────────────────────────────────────────────┐
+  │  FAST (every cycle):  binance 5m klines, dYdX candles, spot price  │
+  │  MEDIUM (every 6th):  + Binance/Bybit funding, Coinalyze daily     │
+  │  SLOW  (every 72nd):  + Deribit DVOL, premium index, taker vol,    │
+  │                         macro (FRED+yfinance), F&G, on-chain,       │
+  │                         blockchain, DeFi, CFTC COT                  │
+  │  14 sources total │ 300s interval │ tiered to minimize API load     │
+  └────────────────────────────────────────────────────────────────────┘
+                               │
+                               ▼
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ STEP 2 — reasoning_agent.py  (7 stages)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ┌─ STAGE 0: Position Monitor + Orphan Cleanup ───────────────────────┐
+  │  Connect to dYdX mainnet (live mode only)                           │
+  │  • cleanup_orphan_orders(): cancel open orders with no position     │
+  │  • verify_position_orders(): if position missing TP/SL →           │
+  │      reprotect at 1% SL / 1.5% TP from entry, GTT 24h             │
+  │  • trail_stops(): advance SL through 3 tiers as PnL grows          │
+  │      Tier 1: PnL ≥ 2.0% → SL to breakeven (0%)                    │
+  │      Tier 2: PnL ≥ 3.5% → lock 1.5% profit                        │
+  │      Tier 3: PnL ≥ 5.0% → lock 2.5% profit                        │
+  │  ► EARLY EXIT: active position found → skip Stages 1–7             │
+  │    (TP/SL + trailing stop already manage it; saves Grok API cost)   │
+  └────────────────────────────────────────────────────────────────────┘
+                               │
+  ┌─ STAGE 1: ML Signal Generation ────────────────────────────────────┐
+  │  signal_generator.py loads model configs from:                      │
+  │    models/v23/production_config_v23.json   → bullish models (15+)  │
+  │    models/bearish/production_config_bearish.json → bearish models  │
+  │                                                                      │
+  │  Feature pipeline (290+ features across 13 groups):                 │
+  │    TA core (dYdX 5m)     → 280 features (RSI,MACD,BB,ATR,CCI…)    │
+  │    Binance TA (5m)        → 86 features (prefixed bnc_)            │
+  │    Cross-exchange         → 19 features                             │
+  │    Funding rates          → 18 features (Binance + Bybit z-scores) │
+  │    Open Interest          →  7 features                             │
+  │    Positioning (L/S)      →  6 features                             │
+  │    Implied Vol (DVOL)     →  7 features                             │
+  │    Macro (SPX,NDX,DXY…)  → 39 features                             │
+  │    Sentiment (F&G)        → 12 features                             │
+  │    On-chain               → 19 features                             │
+  │    DeFi (TVL, stables)    →  8 features                             │
+  │    Coinalyze              → 22 features                             │
+  │    Liquidations           →  4 features                             │
+  │                                                                      │
+  │  Each model → {prob, threshold, signal, strength, quality_weight}  │
+  │  weighted_score = Σ(qw×prob_bull) − Σ(qw×prob_bear) / Σ(qw)       │
+  │  Output: bullish_count / bearish_count / neutral_count / score     │
+  └────────────────────────────────────────────────────────────────────┘
+                               │
+  ┌─ STAGE 1.5: Conventional Strategy Signals ─────────────────────────┐
+  │  StrategyEngine runs all 18 strategies on market_context_data/      │
+  │                                                                      │
+  │  #   Strategy                Signal Logic                  Source   │
+  │  ─────────────────────────────────────────────────────────────────  │
+  │  1   Funding Rate Reversion  z-score < -2.0 (shorts)      Binance  │
+  │                              z-score > +2.0 (longs)        Bybit    │
+  │  2   Volatility Regime       IV/RV > 1.4 fear overblown   Deribit  │
+  │                              IV/RV < 0.7 complacency       DVOL     │
+  │  3   Liquidation & Position  liq cascade + OI divergence  Coinalyze│
+  │  4   Sentiment & Capital     F&G < 20 or > 80 + confirm   F&G/DeFi │
+  │  5   Trend Following         EMA144/288/864/2016 + ADX>25  Binance  │
+  │  6   Technical Momentum      RSI+MACD+Stoch+BB+Fisher+CCI  Binance  │
+  │  7   Macro Risk Regime       7-factor cross-asset score    FRED/yf  │
+  │  8   Basis Reversion         premium z-score ±2.5σ/56d    Binance  │
+  │  9   Taker Flow Imbalance    (buyvol−sellvol) z ±1.5σ/4h  Binance  │
+  │  10  Commodity Risk          Cu/Au z-score ±0.75 (20d)    yfinance │
+  │  11  Funding Carry Momentum  cum_funding > 0.0003 (3d)    Binance  │
+  │  12  Supertrend OBV          ST(7,2) + OBV + TBR>0.505   Binance  │
+  │  13  EMA Trend Regime        4h EMA5/13 × daily EMA50/200 Binance  │
+  │  14  MACD Signal Cross       4h MACD(12,26,9) cross × GC  Binance  │
+  │  15  BB Breakout OBV         4h BB(15,1.8)+OBV+ATR trend  Binance  │
+  │  16  Stochastic EMA Cross    4h Stoch(8,3,3) oversold+EMA Binance  │
+  │  17  RSI Trend Momentum      4h RSI(9) 50-cross from extr Binance  │
+  │  18  VWAP RSI Reversion      4h VWAP(48)+ATR±1.5 breakout Binance  │
+  │                                                                      │
+  │  Output: long_count / short_count / inactive_count + text_summary  │
+  └────────────────────────────────────────────────────────────────────┘
+                               │
+  ┌─ STAGE 2: Market Context ───────────────────────────────────────────┐
+  │  context_builder assembles live data snapshot (~1800 chars):        │
+  │    BTC price (dYdX), 24h change, funding rate                       │
+  │    Open interest, L/S ratio, liquidation data                       │
+  │    Deribit DVOL (implied vol), options OI                           │
+  │    Fear & Greed index, on-chain activity                            │
+  │    DXY, macro regime summary                                        │
+  └────────────────────────────────────────────────────────────────────┘
+                               │
+  ┌─ STAGE 3: Portfolio State (live dYdX query) ───────────────────────┐
+  │    Equity, free collateral, margin used %                           │
+  │    Open positions: side, size, entry_price, unrealized_pnl         │
+  │    Recent fills (last 5)                                            │
+  └────────────────────────────────────────────────────────────────────┘
+                               │
+  ┌─ STAGE 4: Resolve Pending Decisions ───────────────────────────────┐
+  │    Mark previous decisions as TP_HIT / SL_HIT / EXPIRED            │
+  └────────────────────────────────────────────────────────────────────┘
+                               │
+  ┌─ STAGE 5: Decision & Trade History ────────────────────────────────┐
+  │    Last 20 trades: action, direction, entry, fill, PnL, fees       │
+  │    Aggregate stats: win rate, total PnL, avg trade size            │
+  │    Last 10 equity snapshots (curve)                                 │
+  │    RISK_LEVEL derived from recent streak (NORMAL / ELEVATED / HIGH) │
+  └────────────────────────────────────────────────────────────────────┘
+                               │
+  ┌─ STAGE 6: Grok LLM Decision ───────────────────────────────────────┐
+  │  Model:   grok-4-1-fast-reasoning                                   │
+  │  API:     https://api.x.ai/v1/responses                             │
+  │  Tools:   web_search + x_search (real-time BTC news + sentiment)   │
+  │  Retries: 2 attempts × 5s delay; 3 consecutive failures → NO_TRADE │
+  │                                                                      │
+  │  Full prompt assembled in order:                                    │
+  │    1. CURRENT TIME (UTC)                                            │
+  │    2. ML signals text (bullish/bearish/neutral counts, score,       │
+  │         per-model detail with prob/threshold/strength)              │
+  │    3. Strategy signals text (18 strategies, direction, confidence,  │
+  │         explanation, key metrics, consensus counts)                 │
+  │    4. Market context (~1800 chars of live data)                     │
+  │    5. Portfolio state (equity, positions, fills)                    │
+  │    6. Trade history (last 20 trades + aggregate stats + equity curve│
+  │    7. Decision history (recent decisions + RISK_LEVEL + streak)    │
+  │    8. Instruction: search web + X, output JSON                     │
+  │                                                                      │
+  │  System prompt: see documentation/llm_context.md                   │
+  │                                                                      │
+  │  Output JSON:                                                        │
+  │    { direction, confidence, entry_price, take_profit, stop_loss,   │
+  │      duration_minutes, position_size_usd, rationale }               │
+  └────────────────────────────────────────────────────────────────────┘
+                               │
+  ┌─ STAGE 7: Trade Execution ─────────────────────────────────────────┐
+  │  RiskManager — 9 sequential checks (all must pass):                │
+  │    1. direction ∈ {LONG, SHORT}                                     │
+  │    2. equity ≥ $50                                                  │
+  │    3. confidence ≥ 0.62                                             │
+  │    4. price ordering valid (LONG: TP>entry>SL, SHORT: SL>entry>TP) │
+  │    5. R:R ≥ 1.5:1                                                   │
+  │    6. open positions < 1 (max_open_positions)                       │
+  │    7. free_collateral / equity ≥ 20%                                │
+  │    8. $20 ≤ position_size_usd ≤ $600, BTC size ≤ 0.05             │
+  │    9. daily PnL loss < 10% (circuit breaker)                        │
+  │                                                                      │
+  │  DydxExecutor (if all checks pass):                                 │
+  │    • Entry: MARKET order, IOC, ±0.5% slippage, GTB +10 blocks      │
+  │    • Poll fill: 10 × 2s (20s max)                                   │
+  │    • TP: TAKE_PROFIT_MARKET, reduce-only, GTT 24h                  │
+  │    • SL: STOP_MARKET, reduce-only, limit ±1%, GTT 24h              │
+  │                                                                      │
+  │  All results written to:                                            │
+  │    state_data/trades.jsonl   (every order action)                   │
+  │    state_data/portfolio.jsonl (equity snapshots)                    │
+  │    state_data/decisions.jsonl (every Grok decision)                 │
+  │    state_data/heartbeat.json  (cycle health)                        │
+  └────────────────────────────────────────────────────────────────────┘
+```
+
+---
 
 ## Repository Layout
 
 ```
 trading/
-├── run_pipeline.py                  # Orchestrator — single entry point for live trading
-├── build_dataset.py                 # Feature engineering for training (raw_data → parquet)
-├── config/
-│   └── settings.yaml                # All configuration (data sources + execution)
+├── run_pipeline.py                  # Orchestrator — single entry point
+├── config/settings.yaml             # All configuration
 ├── downloaders/                     # 14 data source downloaders
-│   ├── base.py                      #   BaseDownloader with retry, pagination, CSV append
-│   ├── download_all.py              #   Historical bulk download orchestrator
-│   ├── market_context.py            #   Live context refresh (last 24h → market_context_data/)
-│   ├── dydx_hist.py                 #   dYdX v4 Indexer (candles, funding, trades)
-│   ├── binance_hist.py              #   Binance spot + futures (klines, funding, OI, L/S)
-│   ├── deribit_hist.py              #   Deribit (DVOL, options, IV, funding)
-│   ├── bybit_hist.py                #   Bybit (candles, funding, OI)
-│   ├── okx_hist.py                  #   OKX (candles, funding, OI, liquidations)
-│   ├── coinbase_premium_hist.py     #   Coinbase premium spread
-│   ├── hyperliquid_hist.py          #   Hyperliquid (candles, OI)
-│   ├── coinalyze_hist.py            #   Coinalyze (OI, funding, L/S, liquidations)
-│   ├── macro_hist.py                #   FRED + yfinance (equities, FX, commodities, rates)
+│   ├── market_context.py            #   Live refresh (last 24h)
+│   ├── binance_hist.py              #   Spot + futures klines, funding, OI, L/S, taker vol
+│   ├── dydx_hist.py                 #   dYdX v4 candles, funding, trades
+│   ├── deribit_hist.py              #   DVOL, options OI, IV surface
+│   ├── bybit_hist.py / okx_hist.py  #   Funding, OI
+│   ├── coinalyze_hist.py            #   OI, liquidations, L/S, aggregated funding
+│   ├── macro_hist.py                #   FRED (rates, credit) + yfinance (equities, FX, commodities)
 │   ├── sentiment_hist.py            #   Fear & Greed, CoinGecko, Google Trends
 │   ├── btc_network_hist.py          #   mempool.space (mempool, mining, lightning)
-│   ├── blockchain_hist.py           #   Blockchain.com (on-chain metrics)
+│   ├── blockchain_hist.py           #   Blockchain.com (on-chain: addresses, tx vol, hash rate)
 │   ├── defi_hist.py                 #   DefiLlama (TVL, stablecoin supply)
-│   └── cftc_hist.py                 #   CFTC COT reports
-├── features/                        # 14 feature engineering modules
-│   ├── ta_core.py                   #   ~309 TA features (SMA/EMA, RSI, MACD, Bollinger,
-│   │                                #    ATR, volume profile, candle patterns, cross-TF,
-│   │                                #    session, zscore, regime, hit rate) + 97 ML targets
-│   ├── alignment.py                 #   Timestamp alignment utilities
-│   ├── cross_exchange.py            #   Binance–dYdX basis spread, Binance spot alignment
-│   ├── funding.py                   #   Funding rate slopes/changes across exchanges
-│   ├── open_interest.py             #   OI changes (Binance, Bybit, OKX, Coinalyze)
-│   ├── positioning.py               #   L/S ratios, CFTC COT, taker buy/sell
-│   ├── volatility_implied.py        #   Deribit DVOL, IV skew, GARCH residuals
-│   ├── macro.py                     #   Equities, FX, commodities, rates, BTC correlation
-│   ├── sentiment.py                 #   Fear & Greed, market cap momentum
-│   ├── onchain.py                   #   Active addresses, hash rate, mempool, fees
-│   ├── defi.py                      #   TVL changes, stablecoin supply flow
-│   ├── coinalyze.py                 #   Aggregated OI, predicted funding, L/S
-│   ├── dydx_trades.py               #   Trade flow velocity, buy/sell imbalance
-│   └── liquidations.py              #   Liquidation size/side (OKX, Coinalyze)
-├── strategies/                      # 6 conventional trading strategies
-│   ├── base.py                      #   BaseStrategy + StrategySignal dataclass
-│   ├── engine.py                    #   StrategyEngine — runs all 6, formats for LLM prompt
-│   ├── backtest.py                  #   Backtesting framework (walk-forward, metrics, ranking)
-│   ├── funding_rate.py              #   Funding Rate Mean Reversion (derivatives leverage)
-│   ├── volatility_regime.py         #   Volatility Regime & IV/RV divergence (options)
-│   ├── liquidation_flow.py          #   Liquidation Cascade & Positioning (microstructure)
-│   ├── sentiment_flow.py            #   Sentiment & Capital Flow (on-chain + sentiment)
-│   ├── trend_following.py           #   Multi-Timeframe Trend Following (technical)
-│   └── momentum_composite.py       #   Technical Momentum Composite (RSI/MACD/Stoch/BB/Fisher/CCI)
-├── model_training/                  # ML model training scripts
-│   ├── train_model_v23.py           #   Production trainer (Optuna + LGB + CatBoost + WF)
-│   ├── train_v1_all.py              #   Legacy v1 trainer
-│   └── train_v2_all.py              #   Legacy v2 trainer
-├── models/                          # Trained model artifacts
-│   ├── v23/                         #   Production (25 models, 50 .pkl files)
-│   │   ├── prod_*_lgb.pkl           #     LightGBM models (25)
-│   │   ├── prod_*_cb.pkl            #     CatBoost ensemble models (5)
-│   │   ├── production_config_v23.json   # Model metadata, weights, thresholds
-│   │   └── optuna_params_v23.json       # Hyperparameter configs
-│   ├── v2_all/                      #   Earlier production ensemble
-│   └── v1_all/                      #   First iteration
-├── llm_agent/                       # LLM reasoning + pipeline stages
-│   ├── reasoning_agent.py           #   7-stage main orchestrator
-│   ├── signal_generator.py          #   25-model ML inference on live features
-│   ├── context_builder.py           #   58-CSV market context aggregator (9 sections)
-│   ├── portfolio_reader.py          #   dYdX Indexer REST portfolio query
-│   ├── trade_history.py             #   Execution trade log + equity curve reader
-│   ├── decision_manager.py          #   Decision persistence + TP/SL outcome tracking
-│   └── grok_client.py               #   xAI Grok 4 API wrapper (web_search + x_search)
-├── execution/                       # Trade execution layer
-│   ├── risk_manager.py              #   7 pre-trade validation checks + circuit breaker
-│   ├── paper_executor.py            #   Paper trading (Indexer REST only, no SDK)
-│   ├── dydx_client.py               #   Async dYdX v4 SDK wrapper
-│   └── dydx_executor.py             #   Live order executor (entry + TP/SL) + CLI
-├── raw_data/                        # Historical CSVs (59 files, ~441 MB)
-├── processed_data/                  # Training dataset
-│   └── btc_training_dataset.parquet #   ~460 features + 97 targets (~240K rows, 714 MB)
-├── market_context_data/             # Live context CSVs (58 files, last 24h snapshot)
-└── state_data/                      # Execution state (JSONL, append-only)
-    ├── decisions.jsonl              #   Every decision passed to execution
-    ├── trades.jsonl                 #   Every fill, rejection, failure, alert
-    └── portfolio.jsonl              #   Equity/collateral snapshots per cycle
+│   ├── cftc_hist.py                 #   CFTC COT reports (institutional positioning)
+│   ├── coinbase_premium_hist.py     #   Coinbase premium spread
+│   └── hyperliquid_hist.py          #   Hyperliquid candles, OI
+├── features/                        # Feature engineering (14 modules, 290+ features)
+├── model_training/                  # LightGBM/CatBoost training pipelines
+│   ├── v2_all_pipeline.py           #   Bullish models (v23)
+│   └── bearish_pipeline.py          #   Bearish models
+├── models/
+│   ├── v23/                         # 15+ bullish models (up_12_*, up_24_*, up_48_*)
+│   └── bearish/                     # Bearish models (bear_12_*, bear_24_*)
+├── strategies/                      # 18 conventional strategies
+│   ├── base.py                      #   BaseStrategy + StrategySignal (loads YAML params)
+│   ├── engine.py                    #   StrategyEngine (runs all 13, reload_params())
+│   └── *.py                         #   One file per strategy
+├── retraining/                      # Automated retraining + tuning
+│   ├── retrain_manager.py           #   Orchestrator: should_retrain, run_retrain_chain, deploy
+│   ├── run_retrain_chain.sh         #   Shell chain: dataset → bullish → bearish → tuning
+│   ├── train_v2_staging.py          #   Bullish shim → models/v23_staging/
+│   ├── train_bearish_staging.py     #   Bearish shim → models/bearish_staging/
+│   └── strategy_tuner.py           #   Optuna tuner → config/strategy_params_staging.yaml
+├── llm_agent/
+│   ├── reasoning_agent.py           #   7-stage pipeline orchestrator
+│   ├── grok_client.py               #   xAI Grok API wrapper + system prompt
+│   ├── signal_generator.py          #   ML inference (loads models, builds features)
+│   ├── context_builder.py           #   Market context text assembly
+│   ├── portfolio_reader.py          #   dYdX live portfolio query
+│   ├── decision_manager.py          #   Decision persistence + status tracking
+│   └── trade_history.py             #   Trade history + equity curve for prompt
+├── execution/
+│   ├── dydx_client.py               #   dYdX v4 async REST + chain client
+│   ├── dydx_executor.py             #   Order placement, TP/SL, trailing stops, orphan cleanup
+│   ├── risk_manager.py              #   9-check pre-trade validation
+│   └── paper_executor.py            #   Paper trading mode
+└── state_data/
+    ├── trades.jsonl                 # Every order action (entry, TP, SL, orphan, reject)
+    ├── decisions.jsonl              # Every Grok decision with rationale
+    ├── portfolio.jsonl              # Equity snapshots
+    └── heartbeat.json               # Pipeline health + cycle info
 ```
 
 ---
 
-## Data Sources
+## ML Models
 
-14 downloaders in `downloaders/`, all inheriting from `BaseDownloader` with HTTP retry, forward/backward pagination, and CSV append/dedup. Configuration in `config/settings.yaml`. Two orchestrators:
+**Bullish ensemble** (`models/v23/`): 15+ LightGBM/CatBoost models, 3 horizon families:
+- `up_12_*`: 1-hour prediction (most reliable, highest quality_weight)
+- `up_24_*`: 2-hour prediction (second most reliable)
+- `up_48_*`: 4-hour prediction
 
-- **`downloaders/download_all.py`** — full historical download into `raw_data/` (59 CSVs, ~441 MB)
-- **`downloaders/market_context.py`** — last 24h snapshot into `market_context_data/` (58 CSVs)
+**Bearish ensemble** (`models/bearish/`): Dedicated downside models trained on bearish regimes:
+- `bear_12_*`: 1-hour horizon
+- `bear_24_*`: 2-hour horizon
+- Trained April 2026: AUC 0.71/0.69, Sharpe 4.5/6.8 on walk-forward splits
 
-| # | Source | Module | Auth | CSV Files |
-|---|--------|--------|------|-----------|
-| 1 | dYdX v4 Indexer | `dydx_hist.py` | None | candles_5m, funding_rates, market_stats, orderbook_snapshots |
-| 2 | Binance Spot+Futures | `binance_hist.py` | None | spot_klines_5m, futures_klines_5m, funding_rates, open_interest, global_ls_ratio, top_ls_accounts, top_ls_positions, taker_buy_sell, index/mark/premium_price_klines |
-| 3 | Deribit | `deribit_hist.py` | None | dvol, options_summary, historical_vol, funding_rates, futures_summary |
-| 4 | Bybit | `bybit_hist.py` | None | klines_5m, funding_rates, open_interest, ticker_snapshots |
-| 5 | OKX | `okx_hist.py` | None | funding_rates, open_interest, liquidations, taker_volume |
-| 6 | Coinbase Premium | `coinbase_premium_hist.py` | None | coinbase_premium |
-| 7 | Hyperliquid | `hyperliquid_hist.py` | None | market, funding_rates |
-| 8 | Coinalyze | `coinalyze_hist.py` | API key | oi_aggregated, oi_daily, funding_rates, funding_daily, long_short_ratio, long_short_ratio_daily, liquidations, liquidations_daily, predicted_funding |
-| 9 | yfinance + FRED | `macro_hist.py` | FRED key | equities, fx, commodities, rates, credit, liquidity, crypto_adjacent |
-| 10 | Alternative.me / CoinGecko | `sentiment_hist.py` | None | fear_greed, market, google_trends |
-| 11 | mempool.space | `btc_network_hist.py` | None | mempool, mining, lightning |
-| 12 | Blockchain.com | `blockchain_hist.py` | None | onchain |
-| 13 | DefiLlama | `defi_hist.py` | None | tvl, chain_tvl, stablecoin_supply, stablecoin_history |
-| 14 | CFTC EDGAR | `cftc_hist.py` | None | cot_bitcoin |
+**Inference**: Minimum 350 candles (24h × 5m). Each model outputs `prob`, `threshold`, `signal` (BULLISH/BEARISH/NEUTRAL), `strength` (NOT_FIRING/WEAK/MODERATE/STRONG).
 
-**Why dYdX as primary:** We execute on dYdX, so we train on dYdX price data. dYdX has its own order book, funding schedule (hourly), and liquidity profile. Training on Binance but trading on dYdX introduces execution skew. Binance data is kept as supplementary features (basis spread, volume proxy, cross-exchange signals).
+**Weighted score**: `Σ(quality_weight × prob_bullish) − Σ(quality_weight × prob_bearish) / Σ(quality_weight)` → range [−1, +1].
+
+> **Retraining**: Automated every 48h via `retraining/run_retrain_chain.sh`.
+> Runs in background while pipeline keeps trading. New models deploy atomically after full chain passes.
+> Manual trigger: `python run_pipeline.py --full` (blocks until complete, then starts loop).
 
 ---
 
-## Training Pipeline
+## Conventional Strategies
 
-Runs manually to retrain models on updated historical data. Three steps, each producing verifiable output files.
+**Parameter tuning**: Automated every 48h (same cycle as ML retraining) via `retraining/strategy_tuner.py`.
+Optuna sweeps 30 trials per strategy, validates robustness across 4 periods. Best params written to
+`config/strategy_params.yaml` and loaded by `BaseStrategy.__init__()` at engine init time. Class-level
+constants serve as defaults when no YAML override exists.
 
-```
-Step 1: downloaders/download_all.py --full
-          │
-          ▼
-      raw_data/ (59 CSVs from 14 sources, ~441 MB)
-
-Step 2: build_dataset.py
-          │
-          ├── features/ta_core.py ────────── ~309 dYdX TA features (no prefix)
-          ├── features/ta_core.py ────────── ~309 Binance TA features (bnc_ prefix)
-          ├── features/cross_exchange.py ─── Binance–dYdX basis spread
-          ├── features/funding.py ────────── Funding slopes across exchanges
-          ├── features/open_interest.py ──── OI changes (Binance, Bybit, OKX, Coinalyze)
-          ├── features/positioning.py ────── L/S ratios, CFTC COT, taker buy/sell
-          ├── features/volatility_implied.py  Deribit DVOL, IV skew
-          ├── features/macro.py ──────────── Equities, FX, rates, BTC correlation
-          ├── features/sentiment.py ──────── Fear & Greed, market cap momentum
-          ├── features/onchain.py ────────── Hash rate, addresses, mempool
-          ├── features/defi.py ───────────── TVL, stablecoin supply flow
-          ├── features/coinalyze.py ──────── Aggregated OI, predicted funding
-          ├── features/dydx_trades.py ────── Trade flow velocity
-          ├── features/liquidations.py ───── Liquidation size/side
-          └── features/ta_core.compute_targets() ── 97 ML targets
-          │
-          ▼
-      processed_data/btc_training_dataset.parquet
-      (~460 features + 97 targets, ~240K rows, 714 MB)
-
-Step 3: model_training/train_model_v23.py
-          │
-          ├── Phase 0: Per-target top-100 feature selection
-          ├── Phase 1: Optuna hyperparameter optimization (new targets only)
-          ├── Phase 2: Train all models (10-split walk-forward, purged)
-          │            LightGBM (all 25) + CatBoost ensemble (5 models)
-          ├── Phase 3: Quality scoring (recent-weighted WF splits)
-          ├── Phase 4: DD circuit breaker config sweep
-          └── Phase 5: Final production config
-          │
-          ▼
-      models/v23/
-        25 LightGBM .pkl + 5 CatBoost .pkl (50 files total)
-        production_config_v23.json (model metadata, weights, thresholds)
-        optuna_params_v23.json (hyperparameter configs)
-```
-
-### Training Details
-
-**Dataset:** `build_dataset.py` reads `raw_data/` → produces `processed_data/btc_training_dataset.parquet`
-- dYdX 5m candles as master grid (~240K rows, Nov 2023 → present)
-- ~309 TA features from dYdX OHLCV (native, no prefix)
-- ~309 TA features from Binance futures OHLCV (`bnc_` prefix, with 7-day warmup)
-- ~150 supplementary features from 12 feature modules
-- 97 ML targets from `features/ta_core.compute_targets()`:
-  - Direction targets: `target_up_{horizon}_{threshold}` (price rises >threshold in horizon)
-  - Favorable risk-reward: `target_fav_{horizon}_{threshold}`
-  - Horizons: 6, 12, 24, 36, 48 candles (30min, 1h, 2h, 3h, 4h)
-  - Thresholds: 0.1%, 0.2%, 0.3%, 0.5%, 1.0%
-
-**Trainer:** `model_training/train_model_v23.py` reads parquet → produces `models/v23/`
-- Reads from: `processed_data/btc_features_5m.parquet` (note: may need symlink from `btc_training_dataset.parquet`)
-- 10-split walk-forward validation with purging (no look-ahead)
-- LightGBM base for all 25 models, CatBoost ensemble for 5 (blended probability)
-- Optuna: 40 trials per new target, reuses v22 params for proven targets
-- DD circuit breaker backtesting (0.2% max drawdown, 10-candle cooldown)
-- Quality-weighted portfolio scoring for final model selection
-- Fee assumption: 0.04% round-trip (maker)
-
-**v23 Production Models (25):**
-
-| Target Group | Models | Horizons | Prob Thresholds | Notes |
-|-------------|--------|----------|-----------------|-------|
-| `up_6_*` | 7 | 30 min | 0.2%, 0.3%, 0.5%, 1.0% | Highest AUC (0.85 for up_6_001) |
-| `up_12_*` | 3 | 60 min | 0.2%, 0.3%, 0.5% | 2 use CatBoost ensemble |
-| `up_24_*` | 6 | 120 min | 0.2%, 0.3%, 0.5%, 1.0% | |
-| `up_36_*` | 3 | 180 min | 0.2%, 0.3%, 0.5% | |
-| `up_48_*` | 3 | 240 min | 0.2%, 0.3% | |
-| `fav_12_*` | 1 | 60 min | 0.3% | Favorable R:R, CatBoost ensemble |
-| `fav_36_*` | 2 | 180 min | 0.3%, 0.5% | Favorable R:R, CatBoost ensemble |
-
-All models are long-only (predict upward probability). The LLM integrates bearish context from market data separately.
-
-**v23 Backtest Results:** 25 models, 10/10 WF splits positive, Sharpe 3.1, worst DD -0.3%, annualized +461%.
-
-| Step | Command | Input | Output | Status |
-|------|---------|-------|--------|--------|
-| Download data | `python -m downloaders.download_all --full` | 14 APIs | 59 CSVs in `raw_data/` (441 MB) | Working |
-| Build features | `python build_dataset.py` | `raw_data/` CSVs | `processed_data/btc_training_dataset.parquet` (714 MB) | Working |
-| Train models | `python model_training/train_model_v23.py` | parquet | `models/v23/` (50 .pkl + 2 JSON) | Working — 25 production models |
+**Adding a new strategy**:
+1. Create `strategies/your_strategy.py` inheriting `BaseStrategy`
+2. Implement `compute_signal(data)` and `compute_signal_series(data)`
+3. Add to `strategies/engine.py` → `get_selected_strategies()`
+4. Add name to `config/settings.yaml` → `strategies.selected`
+5. Run `python -m strategies.backtest --strategy your_strategy` to verify
 
 ---
 
-## Conventional Trading Strategies
+## Automated Retraining Cycle
 
-6 rule-based strategies that analyze different market drivers, producing LONG / SHORT / INACTIVE signals for the LLM reasoning agent. Each strategy operates on a distinct, uncorrelated data domain.
-
-### Strategy Overview
-
-| # | Strategy | Data Domain | Thesis | Key Data Sources | Backtest Sharpe |
-|---|----------|-------------|--------|-----------------|-----------------|
-| 1 | Funding Rate Mean Reversion | Derivatives leverage | Extreme funding rates create economic pressure for positioning to reverse | Binance/Bybit funding rates, Coinalyze OI | 0.10 |
-| 2 | Volatility Regime | Options pricing | IV/RV divergence reveals market expectations; vol compression precedes breakouts | Deribit DVOL, Binance futures (realized vol) | 0.61 |
-| 3 | Liquidation & Positioning | Market microstructure | Liquidation cascades exhaust; OI-price divergence reveals crowded positions | Coinalyze liquidations, L/S ratio, OI | 0.41 (399% total return) |
-| 4 | Sentiment & Capital Flow | Fundamentals | Extreme FNG is contrarian; stablecoin inflows signal capital entering crypto | Fear & Greed, stablecoins, on-chain metrics | 0.34 |
-| 5 | Trend Following | Technical (long-term) | Multi-timeframe EMA alignment with ADX confirmation catches strong trends | Binance futures klines | 0.42 (498% total return) |
-| 6 | Technical Momentum | Technical (short-term) | Composite of RSI/MACD/Stochastic/Bollinger/Fisher/CCI for momentum swings | Binance futures klines (daily) | 0.30 (77% WR, 63 trades/yr) |
-
-**Signal correlations** between all 6 strategies are < 0.12 — highly uncorrelated.
-
-### Strategy Signal Flow
+Triggered every 48h during the loop, or immediately on `python run_pipeline.py --full`.
+Runs as a background subprocess — pipeline continues trading with current models during retraining.
 
 ```
-raw_data/ or market_context_data/
-    ↓
-┌─────────────────────────────────────────────────────┐
-│ strategies/engine.py — StrategyEngine               │
-├─────────────────────────────────────────────────────┤
-│ For each of 5 strategies:                           │
-│   1. Load required CSVs                             │
-│   2. Compute signal: LONG / SHORT / INACTIVE        │
-│   3. Compute confidence (0.0 – 1.0)                 │
-│   4. Generate human-readable explanation             │
-│                                                      │
-│ Aggregate: consensus (N LONG, N SHORT, N INACTIVE)  │
-│ Format: structured text for LLM prompt              │
-└─────────────────────────────────────────────────────┘
-    ↓
-Added to LLM prompt between ML signals and market context
+run_pipeline.py  (every 48h or --full)
+      │
+      └──► retraining/run_retrain_chain.sh  (background subprocess)
+                │
+                ├── 1. build_dataset.py (root)   → processed_data/btc_training_dataset.parquet
+                │      ~10-30 min | 290+ features, ~240K rows
+                │
+                ├── 2. train_v2_staging.py        → models/v23_staging/
+                │      ~5-6 hours | LightGBM+CatBoost | 40 Optuna trials | 10 walk-forward splits
+                │
+                ├── 3. train_bearish_staging.py   → models/bearish_staging/
+                │      ~30-60 min | 2 bearish targets (bear_12, bear_24)
+                │
+                ├── 4. strategy_tuner.py          → config/strategy_params_staging.yaml
+                │      ~1-2 hours | 30 Optuna trials × 18 strategies
+                │      Anti-overfitting: 4-period validation, no period Sharpe < -0.2,
+                │      min 8 trades/period, Sharpe spread < 4.0, min 20 trades/yr
+                │
+                └── 5. State → 'ready_to_deploy' (retrain_state.json)
+                         │
+                         └── check_and_deploy() called each pipeline cycle
+                               Atomic rename: staging/ → live/ (same filesystem)
+                               models/v23_staging/      → models/v23/
+                               models/bearish_staging/  → models/bearish/
+                               strategy_params_staging.yaml → strategy_params.yaml
+                               strategy_engine.reload_params() → picks up new YAML
 ```
 
-### Backtesting
+**State file**: `state_data/retrain_state.json` — tracks `status`, `last_deployed`, `pid`
 
-Run `python -m strategies.backtest` to backtest all strategies on `raw_data/`.
-
-Metrics computed: total return, annualized return, Sharpe ratio, max drawdown, win rate, profit factor, Calmar ratio, trades per year.
-
-Robustness checks: 3 non-overlapping time periods (2020–2022, 2022–2024, 2024–2026), parameter sensitivity ±20%, signal correlation analysis.
+**Log file**: `logs/retrain.log`
 
 ---
 
-## Live Trading Pipeline
+## Execution Parameters
 
-Runs via `run_pipeline.py` — single invocation or continuous loop mode.
-
-### Orchestrator
-
-```bash
-python run_pipeline.py                        # full pipeline (data + reasoning + paper execution)
-python run_pipeline.py --skip-download        # skip data refresh, use existing market_context_data/
-python run_pipeline.py --no-execute           # stop after Grok decision, don't execute
-python run_pipeline.py --dry-run              # build prompt, print it, don't call Grok
-python run_pipeline.py --skip-signals         # skip ML inference (faster, context + Grok only)
-python run_pipeline.py --loop --interval 300  # repeat every 5 minutes
-```
-
-### Architecture
-
-```mermaid
-flowchart TB
-    subgraph Orchestrator["run_pipeline.py"]
-        direction TB
-        PHASE1["Phase 1: Data Refresh"]
-        PHASE2["Phase 2: Reasoning Agent (7 stages)"]
-        PHASE1 --> PHASE2
-    end
-
-    subgraph DataRefresh["downloaders/market_context.py"]
-        D1["dYdX Indexer"]
-        D2["Binance Spot+Futures"]
-        D3["Deribit / Bybit / OKX /<br/>Coinbase / Hyperliquid"]
-        D4["Coinalyze"]
-        D5["FRED / yfinance"]
-        D6["Sentiment / On-chain /<br/>DeFi / CFTC"]
-    end
-
-    PHASE1 --> DataRefresh
-    DataRefresh -->|"58 CSVs<br/>(last 24h)"| MCD[("market_context_data/")]
-
-    subgraph Stage1["Stage 1: ML Signals — signal_generator.py"]
-        TA["features/ta_core.py<br/>(309 dYdX features)"]
-        BTA["features/ta_core.py<br/>(309 Binance features)"]
-        CX["features/cross_exchange.py<br/>(basis spread)"]
-        SG["25-model inference<br/>predict_proba → BULLISH/NEUTRAL"]
-        MCD --> TA & BTA & CX
-        TA & BTA & CX --> SG
-        MODELS[("models/v23/<br/>25 LGB + 5 CB")] --> SG
-    end
-
-    subgraph Stage15["Stage 1.5: Strategy Signals — strategies/engine.py"]
-        SE["5 conventional strategies:<br/>funding rate, vol regime,<br/>liquidation/positioning,<br/>sentiment/flow, trend following"]
-        MCD --> SE
-    end
-
-    subgraph Stage2["Stage 2: Market Context — context_builder.py"]
-        CB["9 sections from 58 CSVs:<br/>price, funding, OI, options,<br/>on-chain, macro, sentiment,<br/>DeFi, positioning"]
-        MCD --> CB
-    end
-
-    subgraph Stage3["Stage 3: Portfolio — portfolio_reader.py"]
-        PR["Equity, positions, fills"]
-        DYDX_API["dYdX v4<br/>Indexer REST"]
-        DYDX_API --> PR
-    end
-
-    subgraph Stage45["Stages 4-5: History"]
-        DM["decision_manager.py<br/>resolve pending → get summary"]
-        TH["trade_history.py<br/>execution log + equity curve"]
-        HIST[("decision_history.json")] --> DM
-        SD[("state_data/*.jsonl")] --> TH
-    end
-
-    subgraph Stage6["Stage 6: LLM Decision — grok_client.py"]
-        GC["Grok 4 (xAI API)<br/>web_search + x_search"]
-        SG -->|"25 model signals<br/>+ consensus"| GC
-        SE -->|"5 strategy signals<br/>+ consensus"| GC
-        CB -->|"market context"| GC
-        PR -->|"portfolio state"| GC
-        DM -->|"decision outcomes"| GC
-        TH -->|"trade history<br/>+ equity curve"| GC
-        GC <-->|"breaking news<br/>+ X sentiment"| INET(("Web / X"))
-    end
-
-    subgraph Stage7["Stage 7: Execution"]
-        RM["risk_manager.py<br/>(7 pre-trade checks)"]
-        PE["paper_executor.py"]
-        LE["dydx_executor.py"]
-        DC["dydx_client.py"]
-        GC -->|"decision JSON"| RM
-        RM -->|"paper mode"| PE
-        RM -->|"live mode"| DC --> LE
-        PE -->|"simulated fill"| SD
-        LE -->|"entry + TP + SL orders"| DYDX_API
-        LE -->|"fill record"| SD
-    end
-```
-
-### Pipeline Stages Detail
-
-**Stage 1 — ML Signals** (`llm_agent/signal_generator.py`)
-- Loads dYdX + Binance 5m candles from `market_context_data/`
-- Computes ~309 TA features via `features/ta_core.py` (dYdX native, no prefix)
-- Computes ~309 TA features via `features/ta_core.py` (Binance, `bnc_` prefix)
-- Computes cross-exchange basis spread via `features/cross_exchange.py`
-- Loads 25 production models from `models/v23/` (20 LGB-only + 5 LGB+CatBoost)
-- Runs `predict_proba` on latest candle for each model
-- Classifies: BULLISH (firing, prob >= threshold) or NEUTRAL (not firing)
-- Signal strength: STRONG (excess >0.3), MODERATE (>0.15), WEAK
-- Computes weighted consensus score across all models
-- Output: structured dict with per-model signals + aggregate consensus
-
-**Stage 1.5 — Conventional Strategy Signals** (`strategies/engine.py`)
-- Runs 5 rule-based strategies on `market_context_data/` CSVs
-- Each strategy loads its required data, computes LONG / SHORT / INACTIVE signal with confidence
-- Strategies: Funding Rate Mean Reversion, Volatility Regime, Liquidation & Positioning, Sentiment & Capital Flow, Trend Following
-- Computes consensus: count of LONG / SHORT / INACTIVE
-- Output: formatted text with per-strategy signal, confidence, explanation, and key metrics
-
-**Stage 2 — Market Context** (`llm_agent/context_builder.py`)
-- Reads 58 CSVs from `market_context_data/`, extracts latest values
-- Builds 9 sections: price/volume, funding rates (4 exchanges), open interest (4 sources), options/IV (DVOL, put/call, IV skew), on-chain (mempool, mining), macro (equities, FX, commodities, rates), sentiment (Fear & Greed, market cap), DeFi (TVL, stablecoin supply), positioning (L/S ratios, CFTC COT, liquidations)
-- Output: formatted text (~2-3 KB)
-
-**Stage 3 — Portfolio** (`llm_agent/portfolio_reader.py`)
-- Queries dYdX Indexer REST API (read-only, no auth): subaccount equity, free collateral, margin usage, open positions, last 20 fills
-- Requires: `ADDRESS` env var
-- Output: formatted text
-
-**Stage 4 — Resolve Pending** (`llm_agent/decision_manager.py`)
-- Scans `decision_history.json` for PENDING decisions
-- Loads dYdX candles since entry, checks candle-by-candle: SL hit (checked first), TP hit, or duration expired
-- Updates outcomes: TP_HIT, SL_HIT, EXPIRED with exit price, PnL %, actual duration
-
-**Stage 5a — Decision History** (`llm_agent/decision_manager.py`)
-- Last 10 decisions with outcomes, win rate, avg PnL %
-- Source: `llm_agent/decision_history.json`
-
-**Stage 5b — Trade History** (`llm_agent/trade_history.py`)
-- Aggregate stats: total fills, direction split, paper vs live, total notional/fees
-- Recent fills: timestamp, direction, size, fill price, TP/SL, notional, fee, status
-- Recent rejections: timestamp, direction, confidence, reason
-- Equity curve: timestamped snapshots with equity, collateral, margin %, positions
-- Source: `state_data/trades.jsonl` + `state_data/portfolio.jsonl`
-
-**Stage 6 — LLM Decision** (`llm_agent/grok_client.py`)
-- Model: `grok-4-fast-non-reasoning` (xAI API)
-- Tools: `web_search` (breaking BTC/crypto news) + `x_search` (X/Twitter sentiment)
-- Output format: forced JSON (`json_object` mode)
-- System prompt: quantitative hedge fund manager persona with trading rules
-- Returns: `{direction, confidence, entry_price, take_profit, stop_loss, duration_minutes, position_size_pct, rationale}`
-- Retry: 2 attempts with 429 rate-limit backoff
-
-**Stage 7 — Execution** (`execution/`)
-- Risk validation (7 checks) → paper fill or live order placement
-- Logs decision, trade outcome, and portfolio snapshot to `state_data/*.jsonl`
-
-### What the LLM Receives
-
-The prompt sent to Grok is composed of 7 data sections:
-
-```
-CURRENT TIME: 2026-02-26 19:00 UTC
-
-ML MODEL SIGNALS (25 models, latest 5-min candle):
-  BULLISH signals (6 firing):
-    up_48_0002_p40t10: prob=0.42 (thresh=0.40) | 240min +0.2% | weight=0.74 | WEAK
-    ...
-  NEUTRAL signals (14 not firing):
-    ...
-  Consensus: 6/25 bullish, 0/25 bearish, weighted score: +0.0892
-
-CONVENTIONAL STRATEGY SIGNALS (5 strategies):
-  1. FUNDING RATE MEAN REVERSION: LONG (confidence: 0.72)
-     Cross-exchange funding z-score at -1.8 (overleveraged shorts)
-     Key: avg_funding=-0.035% | oi_zscore=1.2
-  2. VOLATILITY REGIME: INACTIVE
-     Vol in normal range (IV/RV=1.09)
-  3. LIQUIDATION & POSITIONING: SHORT (confidence: 0.58)
-     Large long liquidation cascade detected
-  4. SENTIMENT & CAPITAL FLOW: LONG (confidence: 0.61)
-     Near extreme fear with stablecoin inflows
-  5. TREND FOLLOWING: INACTIVE
-     Trend divergence or weak trend (ADX=18)
-  STRATEGY CONSENSUS: 2 LONG, 1 SHORT, 2 INACTIVE
-
-MARKET CONTEXT (latest data from 58 sources):
-  PRICE & VOLUME / FUNDING RATES / OPEN INTEREST / OPTIONS & IV /
-  ON-CHAIN METRICS / MACRO INDICATORS / SENTIMENT / DEFI / POSITIONING
-
-PORTFOLIO STATE (dYdX v4):
-  Equity, free collateral, margin %, open positions, recent fills
-
-TRADE HISTORY (executed orders):
-  Aggregate stats, recent fills with PnL, rejections, equity curve
-
-RECENT DECISIONS (last 10):
-  Direction → outcome (TP_HIT/SL_HIT/EXPIRED), PnL %, win rate
-
-Based on ALL the above data, make your trading decision.
-Search the web for any breaking BTC/crypto news.
-Search X/Twitter for real-time crypto sentiment.
-Then output your decision as JSON.
-```
-
-The system prompt instructs Grok to:
-- Require confidence > 0.6 AND multiple signal types align (ML + strategies + context)
-- Scale position size with confidence: 5% at 0.6, 10% at 0.7, 15% at 0.8, 25% at 0.9+
-- Enforce minimum 1.5:1 risk:reward
-- Treat extreme Fear & Greed as contrarian signals
-- Weight 30-minute models (up_6_*) highest (AUC 0.85)
-- When ML and strategy signals align, confidence should be higher
-- When they diverge, investigate why and weight the more reliable source
-- Strategy consensus provides a macro view of market conditions
-- Learn from recent decision outcomes
-
-### Risk Manager (7 Pre-Trade Checks)
-
-All checks run before every trade. First failure rejects and logs.
-
-| # | Check | Threshold | Config Key |
-|---|-------|-----------|------------|
-| 1 | Direction | Reject NO_TRADE | — |
-| 2 | Confidence | >= 0.6 | `confidence_threshold` |
-| 3 | Risk:Reward | >= 1.5:1 | — |
-| 4 | Open positions | < 1 | `max_open_positions` |
-| 5 | Free collateral | >= 20% of equity | `min_free_collateral_pct` |
-| 6 | Position size | <= 0.05 BTC and <= 25% equity | `max_position_size_btc`, `max_position_pct` |
-| 7 | Daily loss circuit breaker | < 2% of equity lost today | `max_daily_loss_pct` |
-
-### Execution Modes
-
-**Paper mode** (`execution.mode: paper` in settings.yaml):
-- Uses Indexer REST API only — no SDK, no mnemonic required
-- Fetches current BTC price from `/candles/perpetualMarkets/BTC-USD`
-- Simulates fill at market price with 0.05% taker fee estimate
-- Logs to `state_data/trades.jsonl` with `"mode": "paper"`
-- Safe to run anywhere, no wallet needed
-
-**Live mode** (`execution.mode: live`):
-- Uses dYdX v4 Python SDK (`dydx-v4-client`)
-- Places short-term market order for entry (IOC, `good_til_block = current + 10`)
-- Waits `order_confirmation_wait_s` (5s), verifies fill via Indexer
-- Places TAKE_PROFIT conditional order (reduce_only, 24h GTT)
-- Places STOP_LIMIT conditional order (reduce_only, 24h GTT)
-- Retries once on wallet sequence mismatch
-- Logs to `state_data/trades.jsonl` with `"mode": "live"`
-- Requires: `DYDX_MNEMONIC` or `DYDX_TEST_MNEMONIC` in `.env`
-
-Standalone execution CLI:
-```bash
-python -m execution.dydx_executor --paper                    # paper trade latest decision
-python -m execution.dydx_executor --live                     # live trade latest decision
-python -m execution.dydx_executor --paper --decision path.json  # specific decision file
-```
-
-### State Files (append-only JSONL)
-
-**`state_data/trades.jsonl`** — one line per event:
-```json
-{"timestamp":"...","action":"ENTRY","direction":"LONG","side":"BUY","size_btc":0.003,"entry_price":95234.5,"fill_price":95230.0,"take_profit":96500.0,"stop_loss":94000.0,"duration_minutes":120,"confidence":0.78,"notional_usd":285.69,"fee_usd":0.057,"equity_at_entry":1900.0,"mode":"paper","status":"FILLED"}
-{"timestamp":"...","action":"REJECTED","direction":"LONG","confidence":0.55,"rejection_reason":"confidence 0.55 below 0.60","mode":"paper","status":"REJECTED"}
-```
-
-**`state_data/portfolio.jsonl`** — snapshot per cycle:
-```json
-{"timestamp":"...","equity":1900.0,"free_collateral":1614.31,"margin_pct":15.04,"positions":[{"market":"BTC-USD","side":"LONG","size":"0.003"}]}
-```
-
-**`state_data/decisions.jsonl`** — every decision passed to execution:
-```json
-{"timestamp":"...","direction":"LONG","confidence":0.75,"entry_price":68278,"take_profit":69500,"stop_loss":67600,"duration_minutes":120,"position_size_pct":0.1,"rationale":"..."}
-```
+| Parameter | Value |
+|---|---|
+| Market | BTC-USD perpetual (dYdX v4 mainnet) |
+| Max open positions | 1 |
+| Target leverage | 1–5× (conviction-scaled) |
+| Position size | $20–$600 USD notional |
+| Max BTC size | 0.05 BTC |
+| Min equity | $50 (below this: halt) |
+| Min free collateral | 20% of equity |
+| Daily loss limit | 10% (circuit breaker) |
+| Confidence threshold | 0.62 (NORMAL) / 0.70 (ELEVATED) / 0.75 (HIGH) |
+| R:R minimum | 1.5:1 (target 1.65:1+) |
+| Min SL width ≥60min trade | 1.5% |
+| Min SL width 30–59min trade | 1.0% |
+| Entry slippage tolerance | ±0.5% |
+| SL limit slippage | ±1.0% |
+| Fill poll | 10 attempts × 2s |
+| TP/SL order expiry | 24h (GTT) |
+| Trailing stop tiers | 2% → breakeven, 3.5% → +1.5%, 5% → +2.5% |
 
 ---
 
-## Environment Variables
+## Dashboard (Streamlit, local-only)
 
-All secrets in `.env` (gitignored). Configuration in `config/settings.yaml`.
+A separate Streamlit process at `http://127.0.0.1:8501` provides full visibility
+and control over the live bot. **It does not modify pipeline behavior** beyond
+the pause flag.
 
-| Variable | Used By | Required For |
-|----------|---------|--------------|
-| `GROK_API_KEY` | `grok_client.py` | LLM decisions (Stage 6) |
-| `ADDRESS` | `portfolio_reader.py`, `paper_executor.py` | Portfolio queries, paper execution |
-| `DYDX_MNEMONIC` | `dydx_client.py` | Live mainnet execution |
-| `DYDX_TEST_MNEMONIC` | `dydx_client.py` | Live testnet execution |
-| `FRED_API_KEY` | `macro_hist.py` | FRED economic data download |
-| `COINALYZE_API_KEY` | `coinalyze_hist.py` | Coinalyze metrics download |
+**Start:** `bash dashboard/run_dashboard.sh` (or `PORT=8502 bash dashboard/run_dashboard.sh`).
 
----
+### Pages
 
-## Dependencies
+1. **Overview** — bot status (heartbeat), equity/margin, latest decision, retrain state
+2. **Bot Control** — start/stop/pause/resume/restart with full CLI flag picker
+3. **Logs** — live tail of `logs/pipeline_*.log` with level + regex filters
+4. **Pipeline** — 7-stage DAG with per-stage timing and next-run countdown
+5. **Data Explorer** — browse `market_context_data/`, `processed_data/`, `raw_data/` (CSV / Parquet / JSONL) with auto-detected timestamp plotting
+6. **ML Models** — `production_config_*.json` weights bar chart, firing history, live inference
+7. **Strategies** — 18 conventional strategies' live direction + confidence + explanation
+8. **Positions** — equity curve + drawdown, win-rate, P&L by direction, trades ledger
+9. **Backtests** — trigger `strategies.backtest_v2` with live log tail
+10. **Retrain** — `retrain_state.json` viewer + `retraining.retrain_manager.run_retrain_chain` trigger
+11. **Config** — YAML editor for `config/*.yaml` with diff preview and timestamped backups
 
-```
-# Core ML pipeline
-pandas>=2.0.0       numpy>=1.24.0       ta>=0.10.2
-lightgbm>=4.0.0     catboost>=1.2        optuna>=3.3.0
+### Artifacts read by the dashboard
 
-# Data & config
-requests>=2.31.0    python-dotenv>=1.0.0 PyYAML>=6.0
-yfinance>=0.2.31    pytrends>=4.9.2
+| Artifact | Source |
+|---|---|
+| Heartbeat | `state_data/heartbeat.json` (written by `run_pipeline.py:177`) |
+| Trades ledger | `state_data/trades.jsonl` |
+| Portfolio snapshots | `state_data/portfolio.jsonl` |
+| Decisions | `state_data/decisions.jsonl`, `llm_agent/decision.json`, `llm_agent/decision_history.json` |
+| Retrain state | `state_data/retrain_state.json` |
+| Pipeline logs | `logs/pipeline_*.log`, `logs/pipeline_live.log` |
+| ML weights | `models/v23/production_config_v23.json`, `models/bearish/production_config_bearish.json` |
+| Market data | `market_context_data/*.csv`, `processed_data/*.parquet` |
+| Configs | `config/*.yaml` |
 
-# Execution (live mode only)
-dydx-v4-client>=1.1.6
-```
+### Artifacts written by the dashboard
 
----
+| Artifact | Purpose |
+|---|---|
+| `state_data/.bot_pid.json` | tracks the bot process spawned via the UI |
+| `state_data/.pause_flag.json` | pause signal honoured by `reasoning_agent.run()` |
+| `config/.backups/<name>.<UTC>.bak` | timestamped backup of any YAML save |
+| `logs/dashboard_bot_*.log` | stdout/stderr of bot launched from the UI |
+| `logs/dashboard_backtest_*.log` | stdout of backtest jobs |
+| `logs/dashboard_retrain_*.log` | stdout of retrain jobs |
 
-## Verification Checklist
+### Pause-flag protocol
 
-After a full pipeline run (`python run_pipeline.py`), verify:
-
-| File | Written By | What to Check |
-|------|-----------|---------------|
-| `market_context_data/*.csv` | `downloaders/market_context.py` | 58 CSVs with recent timestamps |
-| `llm_agent/decision.json` | `decision_manager.py` | Valid JSON: direction, confidence, prices |
-| `llm_agent/decision_history.json` | `decision_manager.py` | Array with latest entry, PENDING outcome |
-| `state_data/decisions.jsonl` | executor | Latest decision logged |
-| `state_data/trades.jsonl` | executor | ENTRY (filled) or REJECTED record |
-| `state_data/portfolio.jsonl` | executor | Equity snapshot (on successful fill only) |
-
-**Paper mode is the test harness.** Run `python run_pipeline.py` with `execution.mode: paper` in `config/settings.yaml`, then inspect all files above.
+The dashboard's **Pause** button writes `state_data/.pause_flag.json`. The
+reasoning agent checks this file **at the top of every cycle** (right after
+Stage 0). If present, it logs `PAUSE FLAG active — skipping Stages 1-7` and
+returns. Open positions remain protected because Stage 0 (orphan cleanup,
+trailing stops, position monitoring) has already run. **Resume** deletes the
+flag, restoring full pipeline operation on the next cycle.

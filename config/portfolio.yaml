@@ -1,0 +1,23 @@
+strategies:
+- name: MACD Signal Cross
+  sharpe: 1.3470339058215834
+  trades: 155
+  bar_seconds: 86400
+  max_drawdown: 0.22044524133729904
+  source: wf
+- name: Absolute Momentum
+  sharpe: 1.2769797507717888
+  trades: 48
+  bar_seconds: 86400
+  max_drawdown: 0.25885070074723493
+  source: wf
+- name: Weekly Trend
+  sharpe: 1.1753476164339147
+  trades: 26
+  bar_seconds: 604800
+  max_drawdown: 0.2101080290631914
+  source: wf
+criteria:
+  min_sharpe: 1.0
+  min_trades: 20
+  max_corr: 0.6

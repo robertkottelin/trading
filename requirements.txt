@@ -15,3 +15,12 @@ pytrends>=4.9.2
 
 # Execution
 dydx-v4-client>=1.1.6
+
+# Dashboard (local Streamlit UI)
+streamlit>=1.32
+plotly>=5.18
+pyarrow>=14
+streamlit-autorefresh>=1.0
+streamlit-ace>=0.1.1
+psutil>=5.9
+pytest>=7.4

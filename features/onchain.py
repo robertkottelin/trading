@@ -25,24 +25,24 @@ def build_onchain_features(grid: pd.DataFrame) -> pd.DataFrame:
     # Active addresses + 7d change
     result["oc_active_addresses"] = oc["oc_n_unique_addresses"]
     result["oc_addresses_change_7d"] = (
-        result["oc_active_addresses"].pct_change(7 * 288).astype(np.float32)
+        result["oc_active_addresses"].pct_change(7 * 288, fill_method=None).astype(np.float32)
     )
 
     # Transaction volume + 7d change
     result["oc_tx_volume_usd"] = oc["oc_estimated_transaction_volume_usd"]
     result["oc_tx_volume_change_7d"] = (
-        result["oc_tx_volume_usd"].pct_change(7 * 288).astype(np.float32)
+        result["oc_tx_volume_usd"].pct_change(7 * 288, fill_method=None).astype(np.float32)
     )
 
     # Hash rate + 14d change
     result["oc_hash_rate"] = oc["oc_hash_rate"]
     result["oc_hash_rate_change_14d"] = (
-        result["oc_hash_rate"].pct_change(14 * 288).astype(np.float32)
+        result["oc_hash_rate"].pct_change(14 * 288, fill_method=None).astype(np.float32)
     )
 
     # Difficulty change
     result["oc_difficulty_change"] = (
-        oc["oc_difficulty"].pct_change(1).astype(np.float32)
+        oc["oc_difficulty"].pct_change(1, fill_method=None).astype(np.float32)
     )
 
     # Miner revenue + z-score
@@ -58,7 +58,7 @@ def build_onchain_features(grid: pd.DataFrame) -> pd.DataFrame:
 
     # UTXO count change
     result["oc_utxo_change"] = (
-        oc["oc_utxo_count"].pct_change(1).astype(np.float32)
+        oc["oc_utxo_count"].pct_change(1, fill_method=None).astype(np.float32)
     )
 
     # --- BTC network mining (daily, 1.1K rows) ---
@@ -72,11 +72,11 @@ def build_onchain_features(grid: pd.DataFrame) -> pd.DataFrame:
             if "net_avg_hashrate" in m.columns:
                 result["net_hashrate"] = m["net_avg_hashrate"]
                 result["net_hashrate_change_14d"] = (
-                    result["net_hashrate"].pct_change(14 * 288).astype(np.float32)
+                    result["net_hashrate"].pct_change(14 * 288, fill_method=None).astype(np.float32)
                 )
             if "net_difficulty" in m.columns:
                 result["net_difficulty_change"] = (
-                    m["net_difficulty"].pct_change(1).astype(np.float32)
+                    m["net_difficulty"].pct_change(1, fill_method=None).astype(np.float32)
                 )
             if "net_adjustment_pct" in m.columns:
                 result["net_difficulty_adj_pct"] = m["net_adjustment_pct"]
@@ -94,7 +94,7 @@ def build_onchain_features(grid: pd.DataFrame) -> pd.DataFrame:
             if "net_ln_total_capacity" in l.columns:
                 result["net_ln_capacity"] = l["net_ln_total_capacity"]
                 result["net_ln_capacity_change_7d"] = (
-                    result["net_ln_capacity"].pct_change(7 * 288).astype(np.float32)
+                    result["net_ln_capacity"].pct_change(7 * 288, fill_method=None).astype(np.float32)
                 )
             if "net_ln_channel_count" in l.columns:
                 result["net_ln_channels"] = l["net_ln_channel_count"]

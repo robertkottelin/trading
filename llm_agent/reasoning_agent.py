@@ -14,6 +14,7 @@ Usage:
 import argparse
 import asyncio
 import logging
+import os
 import sys
 from datetime import datetime, timezone
 
@@ -25,6 +26,8 @@ from llm_agent import decision_manager, grok_client, trade_history
 from strategies.engine import StrategyEngine
 
 log = logging.getLogger("llm_agent")
+
+PAUSE_FLAG_PATH = os.path.join("state_data", ".pause_flag.json")
 
 
 def setup_logging(verbose: bool = False):
@@ -86,6 +89,13 @@ def run(args):
     network = exec_cfg.get("network", "testnet")
     mode = exec_cfg.get("mode", "paper")
     log.info("Config override — network: %s, mode: %s", network, mode)
+
+    # Tier determines whether Grok runs for active positions:
+    # fast/medium → skip (TP/SL manages position, saves API cost)
+    # slow/all    → run Grok to check for early exit signal every 6h
+    tier = getattr(args, "tier", "fast") or "slow"
+    active_position = None  # set below if we have an open position on slow tier
+
     if mode == "live" and not args.no_execute:
         log.info("Stage 0/7: Orphan cleanup + position monitoring + trailing stops...")
         try:
@@ -122,20 +132,40 @@ def run(args):
             if trail["errors"]:
                 log.warning("Trail stop errors: %s", trail["errors"])
 
-            # Early exit if in an active trade — Grok call not needed since
-            # max_open_positions=1 means any new signal would be rejected anyway.
-            # TP/SL orders + trailing stop already manage the position.
             if startup_portfolio.get("positions"):
                 pos = startup_portfolio["positions"][0]
-                log.info(
-                    "Active %s position in %s — skipping Grok API call (saves API cost). "
-                    "Position protected by TP/SL orders and trailing stop.",
-                    pos.get("side", "?"), pos.get("market", "?"),
-                )
-                return
+                if tier in ("fast", "medium"):
+                    # Fast/medium: skip Grok — TP/SL + trailing stop manage the position.
+                    log.info(
+                        "Active %s position in %s — skipping Grok API call (saves API cost). "
+                        "Position protected by TP/SL orders and trailing stop.",
+                        pos.get("side", "?"), pos.get("market", "?"),
+                    )
+                    return
+                else:
+                    # Slow tier (every ~6h): allow Grok to evaluate early exit.
+                    active_position = pos
+                    log.info(
+                        "Active %s position in %s — slow-tier Grok evaluation for early exit check.",
+                        pos.get("side", "?"), pos.get("market", "?"),
+                    )
 
         except Exception as e:
             log.warning("Startup checks failed (non-fatal): %s", e)
+
+    # --- Dashboard pause flag ---
+    # If state_data/.pause_flag.json is present, skip stages 1-7 entirely.
+    # Stage 0 (position management / orphan cleanup / trailing stops) above
+    # has already run, so existing positions stay protected. New entries are
+    # blocked until the flag is removed via the dashboard's Bot Control page.
+    if os.path.exists(PAUSE_FLAG_PATH):
+        log.warning(
+            "PAUSE FLAG active (%s) — skipping Stages 1-7 (no new entries this cycle). "
+            "Position management (Stage 0) has already run. "
+            "Resume from dashboard Bot Control page to re-enable trading.",
+            PAUSE_FLAG_PATH,
+        )
+        return
 
     # --- Stage 1: ML signals ---
     signals_result = None
@@ -147,9 +177,11 @@ def run(args):
         try:
             signals_result = signal_generator.generate_signals()
             signals_text = signals_result["text_summary"]
-            log.info("ML signals: %d bullish, %d neutral",
+            log.info("ML signals: %d bullish, %d bearish, %d neutral (score=%+.4f)",
                      signals_result["consensus"].get("bullish_count", 0),
-                     signals_result["consensus"].get("neutral_count", 0))
+                     signals_result["consensus"].get("bearish_count", 0),
+                     signals_result["consensus"].get("neutral_count", 0),
+                     signals_result["consensus"].get("weighted_score", 0.0))
         except Exception as e:
             log.warning("Signal generation failed: %s", e)
             signals_text = f"ML MODEL SIGNALS: Error — {e}"
@@ -249,6 +281,47 @@ def run(args):
 
     # --- Print summary ---
     _print_summary(decision)
+
+    # --- Stage 6.5: Slow-tier early exit evaluation ---
+    # If we were tracking an active position (slow-tier only), check whether
+    # Grok's new decision warrants closing it early before attempting any new entry.
+    if active_position and not args.no_execute and mode == "live":
+        direction = decision.get("direction", "NO_TRADE")
+        confidence = decision.get("confidence", 0.0)
+        pos_side = active_position.get("side", "")
+        is_opposite = (
+            (pos_side == "LONG" and direction == "SHORT") or
+            (pos_side == "SHORT" and direction == "LONG")
+        )
+        if is_opposite and confidence >= 0.65:
+            log.info(
+                "Slow-tier early exit: Grok says %s (conf=%.2f) vs active %s — closing position now.",
+                direction, confidence, pos_side,
+            )
+            try:
+                from execution.dydx_client import DydxClient
+                from execution.dydx_executor import DydxExecutor
+
+                async def _close_active():
+                    client = DydxClient(config=exec_cfg)
+                    await client.connect()
+                    try:
+                        executor = DydxExecutor(client, config=exec_cfg)
+                        await executor.close_position(active_position)
+                    finally:
+                        await client.disconnect()
+
+                asyncio.run(_close_active())
+                log.info("Early exit executed. Next cycle will evaluate fresh entry.")
+            except Exception as e:
+                log.error("Early exit failed: %s", e)
+            return  # Do not attempt a new entry this cycle
+        else:
+            log.info(
+                "Slow-tier: Grok says %s (conf=%.2f) vs %s position — no exit signal. Holding.",
+                direction, confidence, pos_side,
+            )
+            return  # Position stays managed by TP/SL; don't try to open another
 
     # --- Stage 7: Execute trade ---
     if not args.no_execute:
@@ -400,6 +473,9 @@ def main():
                             help="Paper trading mode")
     parser.add_argument("--verbose", "-v", action="store_true",
                         help="Enable debug logging")
+    parser.add_argument("--tier", default="fast",
+                        choices=["fast", "medium", "slow", ""],
+                        help="Pipeline tier (fast/medium=skip Grok if in position; slow=exit eval)")
     args = parser.parse_args()
 
     setup_logging(args.verbose)

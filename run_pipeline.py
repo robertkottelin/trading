@@ -4,11 +4,13 @@ Runs the complete pipeline:
   1. Refresh market context data (14 sources, last 24h)
   2. Run reasoning agent (ML signals → market context → portfolio →
      decision history → trade history → Grok → execution)
+  3. (Every 48h) Trigger background ML retraining + strategy parameter tuning
 
 Usage:
     python run_pipeline.py                        # full pipeline, testnet live
     python run_pipeline.py --paper                # paper trading mode
     python run_pipeline.py --no-testnet           # mainnet (CAUTION: real funds)
+    python run_pipeline.py --full                 # retrain/tune on startup, then loop
     python run_pipeline.py --skip-download        # skip data refresh
     python run_pipeline.py --skip-signals         # skip ML inference
     python run_pipeline.py --skip-web-search      # disable Grok web/X search
@@ -128,7 +130,7 @@ def run_market_context(hours: int = 24, tier: str = "") -> bool:
         return False
 
 
-def run_reasoning_agent(args) -> bool:
+def run_reasoning_agent(args, tier: str = "fast") -> bool:
     """Run the reasoning agent (stages 1-7)."""
     log.info("Step 2/2: Running reasoning agent...")
     cmd = [sys.executable, "-m", "llm_agent.reasoning_agent"]
@@ -151,6 +153,8 @@ def run_reasoning_agent(args) -> bool:
         cmd.append("--live")
     else:
         cmd.append("--paper")
+    # Pass tier so reasoning agent can allow Grok exit-eval on slow tier
+    cmd.extend(["--tier", tier or "slow"])
 
     try:
         rc, _, _ = _run_with_pg(cmd, timeout=300)
@@ -213,7 +217,7 @@ def run_once(args, run_number: int = 1, tier: str = "") -> bool:
         log.info("Skipping market context download (--skip-download)")
 
     # Step 2: Reasoning + execution
-    success = run_reasoning_agent(args)
+    success = run_reasoning_agent(args, tier=tier)
 
     log.info("Pipeline run %s", "completed" if success else "FAILED")
     return success
@@ -288,6 +292,8 @@ def main():
                         help="Seconds between cycle starts in loop mode (default: 300)")
     parser.add_argument("--no-tiers", action="store_true",
                         help="Disable tiered downloads — fetch all sources every cycle")
+    parser.add_argument("--full", action="store_true",
+                        help="Run full ML retrain + strategy tuning before starting loop")
 
     parser.add_argument("--verbose", "-v", action="store_true",
                         help="Enable debug logging")
@@ -298,6 +304,21 @@ def main():
     network = "testnet" if args.testnet else "mainnet"
     mode = "live" if args.live else "paper"
     log.info("Network: %s | Mode: %s", network, mode)
+
+    # Lazy-import retrain manager (so missing deps never block the pipeline)
+    try:
+        from retraining.retrain_manager import (
+            should_retrain, run_retrain_chain, check_and_deploy
+        )
+        retrain_available = True
+    except Exception as e:
+        log.warning("Retrain manager unavailable: %s", e)
+        retrain_available = False
+
+    if args.full and retrain_available:
+        log.info("--full: starting blocking ML retrain + strategy tuning chain...")
+        run_retrain_chain(background=False)
+        log.info("--full: retrain chain finished. Proceeding to pipeline loop.")
 
     if args.loop:
         medium_every, slow_every = _load_tier_intervals()
@@ -312,6 +333,17 @@ def main():
             tier = "" if args.no_tiers else _select_tier(run_count, medium_every, slow_every)
             tier_label = "all" if not tier else tier
             log.info("--- Run #%d [%s tier] ---", run_count, tier_label)
+
+            # Retrain scheduling: deploy first (updates last_deployed), then
+            # check if a new retrain is needed against the fresh timestamp.
+            if retrain_available:
+                try:
+                    check_and_deploy()
+                    if should_retrain():
+                        log.info("48h retrain interval reached — launching background chain")
+                        run_retrain_chain(background=True)
+                except Exception as e:
+                    log.warning("Retrain manager error (non-fatal): %s", e)
 
             try:
                 success = run_once(args, run_number=run_count, tier=tier)

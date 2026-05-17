@@ -31,8 +31,8 @@ def build_coinalyze_features(grid: pd.DataFrame) -> pd.DataFrame:
                                      "cz_", lag_days=LAG_DAYS)
             oi_close = oi_aligned["cz_open_interest_close"]
             result["cz_oi_daily"] = oi_close
-            result["cz_oi_change_1d"] = oi_close.pct_change(288).astype(np.float32)
-            result["cz_oi_change_7d"] = oi_close.pct_change(7 * 288).astype(np.float32)
+            result["cz_oi_change_1d"] = oi_close.pct_change(288, fill_method=None).astype(np.float32)
+            result["cz_oi_change_7d"] = oi_close.pct_change(7 * 288, fill_method=None).astype(np.float32)
             result["cz_oi_zscore_30d"] = rolling_zscore(oi_close, 30 * 288)
     except FileNotFoundError:
         pass

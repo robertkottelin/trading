@@ -23,6 +23,21 @@ class BaseStrategy(ABC):
     description: str = ""
     data_files: list[str] = []  # Required CSV filenames
 
+    def __init__(self):
+        """Load tuned parameter overrides from config/strategy_params.yaml if present."""
+        params_path = Path("config/strategy_params.yaml")
+        if params_path.exists():
+            try:
+                import yaml
+                all_params = yaml.safe_load(params_path.read_text()) or {}
+                key = type(self).__name__.lower()
+                overrides = all_params.get(key, {})
+                for k, v in overrides.items():
+                    if hasattr(self, k):
+                        setattr(self, k, v)
+            except Exception:
+                pass  # Never break the pipeline over a bad params file
+
     def load_data(self, data_dir: str) -> dict[str, pd.DataFrame]:
         """Load required CSVs from a data directory."""
         data = {}

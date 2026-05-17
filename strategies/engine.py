@@ -1,4 +1,4 @@
-"""Strategy Engine — runs all 9 selected strategies and formats output for LLM.
+"""Strategy Engine — runs all 18 selected strategies and formats output for LLM.
 
 Usage:
     # In pipeline (uses market_context_data/):
@@ -27,12 +27,21 @@ from strategies.momentum_composite import MomentumComposite
 from strategies.macro_regime import MacroRegime
 from strategies.basis_reversion import BasisReversion
 from strategies.taker_flow import TakerFlowImbalance
+from strategies.commodity_risk import CommodityRiskAppetite
+from strategies.funding_carry import FundingCarryMomentum
+from strategies.supertrend_obv import SupertrendOBV
+from strategies.ema_trend_regime import EMATrendRegime
+from strategies.macd_signal_cross import MACDSignalCross
+from strategies.bb_breakout_obv import BBBreakoutOBV
+from strategies.stochastic_ema_cross import StochasticEMACross
+from strategies.rsi_trend_momentum import RSITrendMomentum
+from strategies.vwap_rsi_reversion import VWAPRSIReversion
 
 log = logging.getLogger(__name__)
 
 
 def get_selected_strategies() -> list[BaseStrategy]:
-    """Return the 9 selected production strategies."""
+    """Return the 18 selected production strategies."""
     return [
         FundingRateReversion(),
         VolatilityRegime(),
@@ -43,6 +52,15 @@ def get_selected_strategies() -> list[BaseStrategy]:
         MacroRegime(),
         BasisReversion(),
         TakerFlowImbalance(),
+        CommodityRiskAppetite(),
+        FundingCarryMomentum(),
+        SupertrendOBV(),
+        EMATrendRegime(),
+        MACDSignalCross(),
+        BBBreakoutOBV(),
+        StochasticEMACross(),
+        RSITrendMomentum(),
+        VWAPRSIReversion(),
     ]
 
 
@@ -51,6 +69,10 @@ class StrategyEngine:
 
     def __init__(self, data_dir: str = "raw_data"):
         self.data_dir = data_dir
+        self.strategies = get_selected_strategies()
+
+    def reload_params(self):
+        """Re-instantiate all strategies to pick up new config/strategy_params.yaml."""
         self.strategies = get_selected_strategies()
 
     def generate_signals(self) -> dict:

@@ -258,6 +258,16 @@ def generate_signals() -> dict:
     else:
         weighted_score = 0.0
 
+    # avg_raw_score: mean(prob - threshold) across all models (firing or not).
+    # Negative = ensemble leans bearish below thresholds; positive = leans bullish.
+    # Gives Grok directional lean visibility even when no model crosses its threshold.
+    raw_scores = []
+    for s in signals.values():
+        if "error" in s or "prob" not in s or "threshold" not in s:
+            continue
+        raw_scores.append(s["prob"] - s["threshold"])
+    avg_raw_score = round(sum(raw_scores) / len(raw_scores), 4) if raw_scores else 0.0
+
     total_models = len(models_list) + len(bearish_models_list)
     consensus = {
         "bullish_count": len(bullish),
@@ -265,6 +275,7 @@ def generate_signals() -> dict:
         "neutral_count": len(neutral),
         "total": total_models,
         "weighted_score": round(weighted_score, 4),
+        "avg_raw_score": avg_raw_score,
     }
 
     text = _format_signals_text(signals, consensus)
@@ -455,6 +466,17 @@ def _format_signals_text(signals: dict, consensus: dict) -> str:
         f"{bear_count}/{total} bearish, "
         f"net weighted score: {ws:+.4f} "
         f"(positive=bullish bias, negative=bearish bias)"
+    )
+
+    ars = consensus.get("avg_raw_score", 0.0)
+    if ars < -0.05:
+        lean = "models lean bearish below thresholds"
+    elif ars > 0.05:
+        lean = "models lean bullish below thresholds"
+    else:
+        lean = "models near-neutral below thresholds"
+    lines.append(
+        f"  Avg raw score (prob−threshold, all models): {ars:+.4f} ({lean})"
     )
 
     return "\n".join(lines)

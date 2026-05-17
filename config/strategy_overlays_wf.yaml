@@ -1,0 +1,175 @@
+absolutemomentum:
+  confidence_min: 0.7
+  max_hold_bars: 40
+  sizing: vol_target
+  stop_loss_pct: 0.1
+  take_profit_pct: null
+  vol_target_annual: 0.6044547636203926
+atrchanneltrend:
+  confidence_min: 0.5
+  max_hold_bars: 10
+  sizing: vol_target
+  stop_loss_pct: 0.07
+  take_profit_pct: 0.12
+  vol_target_annual: 0.3921082800910086
+basisreversion:
+  confidence_min: 0.7
+  max_hold_bars: 10
+  sizing: vol_target
+  stop_loss_pct: null
+  take_profit_pct: 0.12
+  vol_target_annual: 0.2653028789413051
+bbbreakoutobv:
+  confidence_min: 0.0
+  max_hold_bars: 20
+  sizing: vol_target
+  stop_loss_pct: 0.07
+  take_profit_pct: 0.25
+  vol_target_annual: 0.5906852640077327
+commodityriskappetite:
+  confidence_min: 0.0
+  max_hold_bars: 20
+  sizing: binary
+  stop_loss_pct: null
+  take_profit_pct: 0.18
+  vol_target_annual: 0.34946253356811424
+donchianbreakout:
+  confidence_min: 0.5
+  max_hold_bars: 60
+  sizing: vol_target
+  stop_loss_pct: 0.1
+  take_profit_pct: 0.08
+  vol_target_annual: 0.30298262814658694
+dualmomentum:
+  confidence_min: 0.0
+  max_hold_bars: 40
+  sizing: binary
+  stop_loss_pct: null
+  take_profit_pct: null
+  vol_target_annual: 0.2793042884398532
+ematrendregime:
+  confidence_min: 0.0
+  max_hold_bars: 10
+  sizing: vol_target
+  stop_loss_pct: 0.05
+  take_profit_pct: 0.12
+  vol_target_annual: 0.2768533232546591
+fundingcarrymomentum:
+  confidence_min: 0.0
+  max_hold_bars: null
+  sizing: binary
+  stop_loss_pct: null
+  take_profit_pct: 0.12
+  vol_target_annual: 0.4853760457641404
+fundingratereversion:
+  confidence_min: 0.6
+  max_hold_bars: 40
+  sizing: vol_target
+  stop_loss_pct: 0.1
+  take_profit_pct: 0.25
+  vol_target_annual: 0.608883241293305
+liquidationflow:
+  confidence_min: 0.6
+  max_hold_bars: 60
+  sizing: vol_target
+  stop_loss_pct: 0.05
+  take_profit_pct: 0.12
+  vol_target_annual: 0.572851309309752
+macdsignalcross:
+  confidence_min: 0.5
+  max_hold_bars: 20
+  sizing: vol_target
+  stop_loss_pct: null
+  take_profit_pct: 0.08
+  vol_target_annual: 0.527469469593373
+macroregime:
+  confidence_min: 0.7
+  max_hold_bars: 20
+  sizing: vol_target
+  stop_loss_pct: 0.1
+  take_profit_pct: 0.25
+  vol_target_annual: 0.4950609291047051
+maregime:
+  confidence_min: 0.5
+  max_hold_bars: 20
+  sizing: binary
+  stop_loss_pct: null
+  take_profit_pct: 0.08
+  vol_target_annual: 0.3943524276597546
+momentumcomposite:
+  confidence_min: 0.7
+  max_hold_bars: 40
+  sizing: binary
+  stop_loss_pct: null
+  take_profit_pct: 0.08
+  vol_target_annual: 0.6266384508916358
+rsitrendmomentum:
+  confidence_min: 0.0
+  max_hold_bars: 10
+  sizing: binary
+  stop_loss_pct: null
+  take_profit_pct: 0.08
+  vol_target_annual: 0.4707968982311036
+sentimentflow:
+  confidence_min: 0.6
+  max_hold_bars: null
+  sizing: binary
+  stop_loss_pct: 0.07
+  take_profit_pct: 0.18
+  vol_target_annual: 0.36769423252819894
+stochasticemacross:
+  confidence_min: 0.0
+  max_hold_bars: 10
+  sizing: binary
+  stop_loss_pct: null
+  take_profit_pct: null
+  vol_target_annual: 0.45214211524134496
+supertrendobv:
+  confidence_min: 0.7
+  max_hold_bars: 60
+  sizing: vol_target
+  stop_loss_pct: 0.05
+  take_profit_pct: 0.08
+  vol_target_annual: 0.2653028789413051
+volatilitycarry:
+  confidence_min: 0.0
+  max_hold_bars: 60
+  sizing: vol_target
+  stop_loss_pct: null
+  take_profit_pct: 0.12
+  vol_target_annual: 0.2873548800302251
+volatilityregime:
+  confidence_min: 0.0
+  max_hold_bars: null
+  sizing: binary
+  stop_loss_pct: 0.1
+  take_profit_pct: 0.18
+  vol_target_annual: 0.28747809594463697
+volsqueezebreakout:
+  confidence_min: 0.5
+  max_hold_bars: 60
+  sizing: vol_target
+  stop_loss_pct: null
+  take_profit_pct: null
+  vol_target_annual: 0.5574394930629785
+vwaprsireversion:
+  confidence_min: 0.0
+  max_hold_bars: 40
+  sizing: vol_target
+  stop_loss_pct: null
+  take_profit_pct: 0.08
+  vol_target_annual: 0.36144122440920157
+weekendeffect:
+  confidence_min: 0.5
+  max_hold_bars: 40
+  sizing: vol_target
+  stop_loss_pct: null
+  take_profit_pct: 0.25
+  vol_target_annual: 0.2523584334335972
+weeklytrend:
+  confidence_min: 0.5
+  max_hold_bars: null
+  sizing: vol_target
+  stop_loss_pct: null
+  take_profit_pct: 0.25
+  vol_target_annual: 0.4630980981242001

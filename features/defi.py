@@ -19,10 +19,10 @@ def build_defi_features(grid: pd.DataFrame) -> pd.DataFrame:
 
     # 7d and 30d change
     result["defi_tvl_change_7d"] = (
-        result["defi_tvl"].pct_change(7 * 288).astype(np.float32)
+        result["defi_tvl"].pct_change(7 * 288, fill_method=None).astype(np.float32)
     )
     result["defi_tvl_change_30d"] = (
-        result["defi_tvl"].pct_change(30 * 288).astype(np.float32)
+        result["defi_tvl"].pct_change(30 * 288, fill_method=None).astype(np.float32)
     )
 
     # --- Chain TVL (ETH + SOL share) ---
@@ -49,7 +49,7 @@ def build_defi_features(grid: pd.DataFrame) -> pd.DataFrame:
 
     result["defi_stable_supply"] = stable_aligned["defi_total_circulating_usd"]
     result["defi_stable_change_7d"] = (
-        result["defi_stable_supply"].pct_change(7 * 288).astype(np.float32)
+        result["defi_stable_supply"].pct_change(7 * 288, fill_method=None).astype(np.float32)
     )
     result["defi_stable_zscore"] = rolling_zscore(
         result["defi_stable_supply"], 30 * 288)

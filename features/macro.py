@@ -16,12 +16,12 @@ LAG_DAYS = 1
 
 def _daily_return(s: pd.Series) -> pd.Series:
     """1-day return from close prices."""
-    return s.pct_change(1).astype(np.float32)
+    return s.pct_change(1, fill_method=None).astype(np.float32)
 
 
 def _nday_return(s: pd.Series, n: int) -> pd.Series:
     """N-day return from close prices."""
-    return s.pct_change(n).astype(np.float32)
+    return s.pct_change(n, fill_method=None).astype(np.float32)
 
 
 def build_macro_features(grid: pd.DataFrame,
@@ -106,7 +106,7 @@ def build_macro_features(grid: pd.DataFrame,
         btc_price_aligned["macro_btc_close"].replace(0, np.nan)
     ).astype(np.float32)
     result["macro_eth_btc_change"] = (
-        result["macro_eth_btc_ratio"].pct_change(1).astype(np.float32)
+        result["macro_eth_btc_ratio"].pct_change(1, fill_method=None).astype(np.float32)
     )
 
     # ETF volume z-scores
@@ -184,7 +184,7 @@ def build_macro_features(grid: pd.DataFrame,
                 walcl = liq_aligned["macro_WALCL"]
                 # 4-week change (weekly series → 4 * 7 * 288 = 8064 candles)
                 result["macro_walcl_change_4w"] = walcl.pct_change(
-                    4 * 7 * 288).astype(np.float32)
+                    4 * 7 * 288, fill_method=None).astype(np.float32)
             if "RRPONTSYD" in liq_cols:
                 rrp = liq_aligned["macro_RRPONTSYD"]
                 result["macro_rrp_level"] = rrp

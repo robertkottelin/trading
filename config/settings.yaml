@@ -102,13 +102,14 @@ execution:
   order_confirmation_wait_s: 5      # legacy — use fill_poll settings below
   fill_poll_max_attempts: 30        # max times to check Indexer for fill
   fill_poll_interval_s: 3           # seconds between fill poll attempts (total max wait: 90s)
-  confidence_threshold: 0.62
+  confidence_threshold: 0.65
+  sl_cooldown_minutes: 90          # re-entry cooldown after SL hit or position close
   max_position_size_btc: 0.05
   max_position_pct: 0.25
   min_position_size_usd: 20
   max_position_size_usd: 600
   target_leverage: 5.0
-  max_daily_loss_pct: 2.0
+  max_daily_loss_pct: 10.0
   max_open_positions: 1
   min_free_collateral_pct: 20.0
   min_equity_usd: 50
@@ -118,6 +119,8 @@ execution:
   trail_trigger_pct_lock2: 5.0
   trail_lock_pct_1: 1.5
   trail_lock_pct_2: 2.5
+  reprotect_tp_pct: 0.025   # 2.5% TP on re-protection — matches original Grok trade parameters
+  reprotect_sl_pct: 0.015   # 1.5% SL on re-protection — matches original Grok trade parameters
 
 # Pipeline timing — tiered download schedule
 pipeline:
@@ -142,3 +145,12 @@ strategies:
     - macro_regime
     - basis_reversion
     - taker_flow
+    - commodity_risk
+    - funding_carry
+    - supertrend_obv
+    - ema_trend_regime
+    - macd_signal_cross
+    - bb_breakout_obv
+    - stochastic_ema_cross
+    - rsi_trend_momentum
+    - vwap_rsi_reversion

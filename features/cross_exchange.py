@@ -95,7 +95,7 @@ def build_cross_exchange_features(grid: pd.DataFrame,
     # dYdX OI
     result["dydx_oi_start"] = dydx_oi.astype(np.float32)
     dydx_oi_s = pd.Series(dydx_oi)
-    result["dydx_oi_change_12"] = dydx_oi_s.pct_change(12).astype(np.float32).values
+    result["dydx_oi_change_12"] = dydx_oi_s.pct_change(12, fill_method=None).astype(np.float32).values
 
     # dYdX orderbook mid spread
     dydx_close_safe = np.where(dydx_close == 0, np.nan, dydx_close)

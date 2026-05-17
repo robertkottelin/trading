@@ -78,6 +78,16 @@ class DydxExecutor:
             log.info("Trade rejected: %s", reason)
             return record
 
+        # 4b. Re-entry cooldown: block new entries within N minutes of last position close
+        direction = decision.get("direction", "NO_TRADE")
+        if direction in ("LONG", "SHORT") and not portfolio.get("positions"):
+            cooldown_reason = self._check_reentry_cooldown()
+            if cooldown_reason:
+                record = self._rejection_record(decision, cooldown_reason)
+                self._append_jsonl("trades.jsonl", record)
+                log.info("Trade rejected: %s", cooldown_reason)
+                return record
+
         # 5. Build order parameters
         price = await self.dydx.get_current_price()
         order_params = self._build_order_params(decision, portfolio, price)
@@ -408,6 +418,59 @@ class DydxExecutor:
             log.info("Re-protected %s position with %s", market, "+".join(placed))
 
         return placed
+
+    async def close_position(self, pos: dict) -> bool:
+        """Close an open position: cancel existing orders then market-close.
+
+        Used by slow-tier early exit when Grok signals the opposite direction
+        with high confidence. Returns True if close was submitted successfully.
+        """
+        from dydx4.clients.helpers.chain_helpers import OrderSide
+
+        side = pos.get("side", "LONG")
+        market = pos.get("market", self.cfg.get("market", "BTC-USD"))
+        close_side = OrderSide.SELL if side == "LONG" else OrderSide.BUY
+
+        log.info("close_position: cancelling existing orders for %s %s", side, market)
+
+        # Cancel all open TP/SL orders for this market first
+        try:
+            open_orders = await self.dydx.get_open_orders()
+            for order in open_orders:
+                if order.get("market") == market:
+                    try:
+                        client_id = int(order["client_id"]) if str(order["client_id"]).isdigit() else 0
+                        await self.dydx.cancel_order(
+                            client_id=client_id,
+                            order_flags=order.get("order_flags", ""),
+                            good_til_block=order.get("good_til_block"),
+                            good_til_block_time=order.get("good_til_block_time"),
+                        )
+                        log.info("Cancelled order %s for early exit", order.get("order_id", "?"))
+                    except Exception as e:
+                        log.warning("Could not cancel order %s: %s", order.get("order_id", "?"), e)
+        except Exception as e:
+            log.warning("Could not fetch orders for cancellation: %s", e)
+
+        # Market-close the position
+        params = {
+            "size_btc": float(pos.get("size", 0)),
+            "market_price": float(pos.get("entry_price", 0)),
+        }
+        await self._emergency_close(params, close_side)
+
+        self._append_jsonl("trades.jsonl", {
+            "timestamp": _ts(),
+            "action": "EARLY_EXIT",
+            "market": market,
+            "side": side,
+            "size": params["size_btc"],
+            "reason": "Slow-tier Grok exit signal (opposite direction, conf>=0.65)",
+            "mode": "live",
+            "status": "SUBMITTED",
+        })
+        log.info("Early exit submitted: closed %s %s", side, market)
+        return True
 
     async def trail_stops(self) -> dict:
         """Move stop-loss orders upward (for LONGs) as unrealized PnL grows.
@@ -809,9 +872,10 @@ class DydxExecutor:
         except Exception as e:
             log.warning("Could not fetch actual position size: %s — using ordered size", e)
 
-        # Expiry: trade duration + 1 hour buffer, clamped to [1h, 24h]
-        duration_min = decision.get("duration_minutes", 60)
-        gtt_seconds = min(max((duration_min + 60) * 60, 3600), 86400)
+        # Expiry: 24h for all TP/SL orders so they never expire mid-trade.
+        # A 90-min trade with only 2.5h expiry leaves the position naked if
+        # TP/SL don't trigger on time. Orders fill and orphan-clean correctly.
+        gtt_seconds = 86400
 
         # Take profit
         tp_price = params["take_profit"]
@@ -960,6 +1024,48 @@ class DydxExecutor:
             raise FileNotFoundError(f"Decision file not found: {fpath}")
         with open(fpath) as f:
             return json.load(f)
+
+    def _check_reentry_cooldown(self) -> str | None:
+        """Return rejection reason if re-entry cooldown is active, else None.
+
+        Reads the last ENTRY record from trades.jsonl and rejects if the
+        elapsed time since that entry is less than sl_cooldown_minutes.
+        This prevents immediately re-entering after a stop-out.
+        """
+        cooldown_min = self.cfg.get("sl_cooldown_minutes", 90)
+        trades_path = os.path.join(self.state_dir, "trades.jsonl")
+        last_entry_ts = None
+        try:
+            with open(trades_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if rec.get("action") == "ENTRY":
+                        last_entry_ts = rec.get("timestamp")
+        except FileNotFoundError:
+            return None
+
+        if not last_entry_ts:
+            return None
+
+        try:
+            from datetime import datetime, timezone
+            last_dt = datetime.fromisoformat(last_entry_ts).astimezone(timezone.utc)
+            elapsed_min = (datetime.now(timezone.utc) - last_dt).total_seconds() / 60
+            if elapsed_min < cooldown_min:
+                remaining = int(cooldown_min - elapsed_min)
+                return (
+                    f"re-entry cooldown active: last trade {int(elapsed_min)}m ago "
+                    f"({remaining}m remaining of {cooldown_min}m cooldown)"
+                )
+        except Exception:
+            pass
+        return None
 
     def _rejection_record(self, decision: dict, reason: str) -> dict:
         return {

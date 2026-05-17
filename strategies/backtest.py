@@ -24,6 +24,15 @@ from strategies.sentiment_flow import SentimentFlow
 from strategies.basis_reversion import BasisReversion
 from strategies.trend_following import TrendFollowing
 from strategies.momentum_composite import MomentumComposite
+from strategies.commodity_risk import CommodityRiskAppetite
+from strategies.funding_carry import FundingCarryMomentum
+from strategies.supertrend_obv import SupertrendOBV
+from strategies.ema_trend_regime import EMATrendRegime
+from strategies.macd_signal_cross import MACDSignalCross
+from strategies.bb_breakout_obv import BBBreakoutOBV
+from strategies.stochastic_ema_cross import StochasticEMACross
+from strategies.rsi_trend_momentum import RSITrendMomentum
+from strategies.vwap_rsi_reversion import VWAPRSIReversion
 
 DATA_DIR = "raw_data"
 FEE_PER_SIDE = 0.0013  # 10bps fee + 3bps slippage
@@ -39,6 +48,15 @@ def get_all_strategies() -> list[BaseStrategy]:
         BasisReversion(),
         TrendFollowing(),
         MomentumComposite(),
+        CommodityRiskAppetite(),
+        FundingCarryMomentum(),
+        SupertrendOBV(),
+        EMATrendRegime(),
+        MACDSignalCross(),
+        BBBreakoutOBV(),
+        StochasticEMACross(),
+        RSITrendMomentum(),
+        VWAPRSIReversion(),
     ]
 
 

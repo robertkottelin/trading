@@ -30,7 +30,12 @@ def build_implied_vol_features(grid: pd.DataFrame,
 
     result["dvol_close"] = dvol_aligned["dvol_close"]
     result["dvol_momentum_12"] = result["dvol_close"].diff(12).astype(np.float32)
-    result["dvol_zscore_288"] = rolling_zscore(result["dvol_close"], 288)
+    # DVOL is hourly cadence; compute z-score over 288 events (~12 days) in
+    # event-space, then ffill — avoids std=0 from long forward-filled runs.
+    dvol_raw = load_csv("deribit_dvol.csv").sort_values("timestamp_ms").reset_index(drop=True)
+    dvol_raw["_z"] = rolling_zscore(dvol_raw["dvol_close"], 288)
+    dvol_z = align_ffill(dvol_raw, gms, "timestamp_ms", ["_z"], "")
+    result["dvol_zscore_288"] = dvol_z["_z"]
 
     # Intraday range of DVOL
     result["dvol_intraday_range"] = (
